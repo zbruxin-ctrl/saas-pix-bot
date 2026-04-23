@@ -1,7 +1,6 @@
 // CRUD de produtos no painel admin
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-<<<<<<< HEAD
 import { requireRole } from '../../middleware/auth';
 import { AuthenticatedRequest } from '../../middleware/auth';
 import { PrismaClient, Prisma } from '@prisma/client';
@@ -9,14 +8,12 @@ import { PrismaClient, Prisma } from '@prisma/client';
 const prisma = new PrismaClient();
 
 export const adminProductsRouter = Router();
-=======
 import { PrismaClient, Prisma } from '@prisma/client';
 import { requireRole } from '../../middleware/auth';
 import { AuthenticatedRequest } from '../../middleware/auth';
 
 export const adminProductsRouter = Router();
 const prisma = new PrismaClient();
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
 
 const productSchema = z.object({
   name: z.string().min(2, 'Nome deve ter pelo menos 2 caracteres').max(100),
@@ -55,7 +52,6 @@ adminProductsRouter.post(
     const data = productSchema.parse(req.body);
 
     const product = await prisma.product.create({
-<<<<<<< HEAD
       data: {
         ...data,
         metadata:
@@ -64,13 +60,11 @@ adminProductsRouter.post(
             : (data.metadata ?? Prisma.JsonNull) as Prisma.InputJsonValue,
       },
     });
-=======
   data: {
     ...data,
     metadata: data.metadata ?? Prisma.JsonNull,
   },
 });
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
 
     res.status(201).json({
       success: true,
@@ -89,21 +83,18 @@ adminProductsRouter.put(
     const product = await prisma.product.update({
       where: { id: req.params.id },
       data: {
-<<<<<<< HEAD
   	...data,
   	metadata:
     	  data.metadata === undefined
       	    ? undefined
       	    : (data.metadata ?? Prisma.JsonNull) as unknown as Prisma.InputJsonValue,
 	},
-=======
         ...data,
         metadata:
           data.metadata === undefined
             ? undefined
             : data.metadata ?? Prisma.JsonNull,
       },
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
     });
 
     res.json({

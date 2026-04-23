@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 import { Router } from 'express';
 import { requireAuth } from '../../middleware/auth';
 
@@ -17,7 +16,6 @@ router.use('/products', adminProductsRouter);
 router.use('/users', adminUsersRouter);
 
 export default router;
-=======
 // Router principal do painel admin
 // Agrupa todas as rotas protegidas do admin
 import { Router } from 'express';
@@ -36,4 +34,3 @@ adminRouter.use('/dashboard', adminDashboardRouter);
 adminRouter.use('/payments', adminPaymentsRouter);
 adminRouter.use('/products', adminProductsRouter);
 adminRouter.use('/users', adminUsersRouter);
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05

@@ -6,7 +6,6 @@ import { getPayment } from '@/lib/api';
 import StatusBadge from '@/components/admin/StatusBadge';
 import { formatCurrency, formatDate } from '@/lib/utils';
 
-<<<<<<< HEAD
 // ✅ TIPAGEM CORRETA
 type Payment = {
   id: string;
@@ -48,12 +47,10 @@ export default function PaymentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [payment, setPayment] = useState<Payment | null>(null);
-=======
 export default function PaymentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [payment, setPayment] = useState<Record<string, unknown> | null>(null);
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -71,19 +68,16 @@ export default function PaymentDetailPage() {
 
   if (!payment) return null;
 
-<<<<<<< HEAD
   const user = payment.telegramUser || {};
   const product = payment.product || {};
   const order = payment.order || null;
   const deliveryLogs = order?.deliveryLogs || [];
   const webhookEvents = payment.webhookEvents || [];
-=======
   const user = payment.telegramUser as Record<string, string>;
   const product = payment.product as Record<string, unknown>;
   const order = payment.order as Record<string, unknown> | null;
   const deliveryLogs = order?.deliveryLogs as Array<Record<string, unknown>> || [];
   const webhookEvents = payment.webhookEvents as Array<Record<string, unknown>> || [];
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -95,7 +89,6 @@ export default function PaymentDetailPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-<<<<<<< HEAD
         {/* Pagamento */}
         <div className="card space-y-4">
           <h2 className="font-semibold text-gray-900 text-lg">Pagamento</h2>
@@ -115,7 +108,6 @@ export default function PaymentDetailPage() {
         </div>
 
         {/* Usuário */}
-=======
         {/* Informações do pagamento */}
         <div className="card space-y-4">
           <h2 className="font-semibold text-gray-900 text-lg">Pagamento</h2>
@@ -133,22 +125,17 @@ export default function PaymentDetailPage() {
         </div>
 
         {/* Informações do usuário */}
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
         <div className="card space-y-4">
           <h2 className="font-semibold text-gray-900 text-lg">Usuário Telegram</h2>
           <InfoRow label="Nome" value={user.firstName || '—'} />
           <InfoRow label="Username" value={user.username ? `@${user.username}` : '—'} />
-<<<<<<< HEAD
           <InfoRow label="Telegram ID" value={user.telegramId || '—'} mono />
-=======
           <InfoRow label="Telegram ID" value={user.telegramId} mono />
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
         </div>
 
         {/* Produto */}
         <div className="card space-y-4">
           <h2 className="font-semibold text-gray-900 text-lg">Produto</h2>
-<<<<<<< HEAD
           <InfoRow label="Nome" value={product.name || '—'} bold />
           <InfoRow label="Tipo de Entrega" value={product.deliveryType || '—'} />
           <InfoRow label="Status do Pedido" value={order?.status || 'Sem pedido'} />
@@ -159,7 +146,6 @@ export default function PaymentDetailPage() {
         </div>
 
         {/* Logs */}
-=======
           <InfoRow label="Nome" value={product.name as string} bold />
           <InfoRow label="Tipo de Entrega" value={product.deliveryType as string} />
           <InfoRow label="Status do Pedido" value={order ? (order.status as string) : 'Sem pedido'} />
@@ -169,7 +155,6 @@ export default function PaymentDetailPage() {
         </div>
 
         {/* Logs de entrega */}
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
         {deliveryLogs.length > 0 && (
           <div className="card space-y-3">
             <h2 className="font-semibold text-gray-900 text-lg">Logs de Entrega</h2>
@@ -179,7 +164,6 @@ export default function PaymentDetailPage() {
                 log.status === 'FAILED' ? 'bg-red-50 text-red-800' :
                 'bg-yellow-50 text-yellow-800'
               }`}>
-<<<<<<< HEAD
                 <div className="font-medium">
                   Tentativa {log.attempt} — {log.status}
                 </div>
@@ -190,35 +174,29 @@ export default function PaymentDetailPage() {
                 <div className="text-xs opacity-60 mt-1">
                   {log.createdAt ? formatDate(log.createdAt) : ''}
                 </div>
-=======
                 <div className="font-medium">Tentativa {log.attempt as number} — {log.status as string}</div>
                 {log.message && <div className="mt-1 text-xs">{log.message as string}</div>}
                 {log.error && <div className="mt-1 text-xs text-red-700">{log.error as string}</div>}
                 <div className="text-xs opacity-60 mt-1">{formatDate(log.createdAt as string)}</div>
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
               </div>
             ))}
           </div>
         )}
       </div>
 
-<<<<<<< HEAD
       {/* Webhooks */}
       {webhookEvents.length > 0 && (
         <div className="card">
           <h2 className="font-semibold text-gray-900 text-lg mb-4">Eventos Webhook</h2>
 
-=======
       {/* Webhook events */}
       {webhookEvents.length > 0 && (
         <div className="card">
           <h2 className="font-semibold text-gray-900 text-lg mb-4">Eventos Webhook</h2>
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-100">
-<<<<<<< HEAD
                   <th className="text-left py-2">Tipo</th>
                   <th className="text-left py-2">ID Externo</th>
                   <th className="text-left py-2">Status</th>
@@ -235,7 +213,6 @@ export default function PaymentDetailPage() {
                     <td className="py-2">
                       {e.createdAt ? formatDate(e.createdAt) : ''}
                     </td>
-=======
                   <th className="text-left py-2 font-semibold text-gray-600">Tipo</th>
                   <th className="text-left py-2 font-semibold text-gray-600">ID Externo</th>
                   <th className="text-left py-2 font-semibold text-gray-600">Status</th>
@@ -249,7 +226,6 @@ export default function PaymentDetailPage() {
                     <td className="py-2 font-mono">{e.externalId as string}</td>
                     <td className="py-2">{e.status as string}</td>
                     <td className="py-2">{formatDate(e.createdAt as string)}</td>
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
                   </tr>
                 ))}
               </tbody>
@@ -261,16 +237,13 @@ export default function PaymentDetailPage() {
   );
 }
 
-<<<<<<< HEAD
 function InfoRow({
   label,
   value,
   mono,
   bold,
 }: {
-=======
 function InfoRow({ label, value, mono, bold }: {
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
   label: string;
   value: React.ReactNode;
   mono?: boolean;
@@ -279,14 +252,11 @@ function InfoRow({ label, value, mono, bold }: {
   return (
     <div className="flex items-start justify-between gap-4">
       <span className="text-sm text-gray-500 flex-shrink-0">{label}</span>
-<<<<<<< HEAD
 
       <span className={`text-sm text-right ${
         mono ? 'font-mono text-xs' : ''
       } ${bold ? 'font-semibold' : ''} text-gray-900`}>
-=======
       <span className={`text-sm text-right ${mono ? 'font-mono text-xs' : ''} ${bold ? 'font-semibold' : ''} text-gray-900`}>
->>>>>>> a4ba2a08fda8eebc6f3ab2989f5f9326189aee05
         {value}
       </span>
     </div>
