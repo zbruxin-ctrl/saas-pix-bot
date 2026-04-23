@@ -1,10 +1,10 @@
 // Router principal do painel admin — agrupa todas as rotas protegidas
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
-import { adminDashboardRouter } from './admin/dashboard';
-import { adminPaymentsRouter } from './admin/payments';
-import { adminProductsRouter } from './admin/products';
-import { adminUsersRouter } from './admin/users';
+import { requireAuth } from '../../middleware/auth';
+import { adminDashboardRouter } from './dashboard';
+import { adminPaymentsRouter } from './payments';
+import { adminProductsRouter } from './products';
+import { adminUsersRouter } from './users';
 
 export const adminRouter = Router();
 
