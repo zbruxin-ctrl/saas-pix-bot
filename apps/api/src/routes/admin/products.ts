@@ -1,7 +1,7 @@
 // CRUD de produtos no painel admin
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '@prisma/client'
 import { requireRole } from '../../middleware/auth';
 import { AuthenticatedRequest } from '../../middleware/auth';
 
