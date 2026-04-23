@@ -1,11 +1,12 @@
 // CRUD de produtos no painel admin
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '@prisma/client'
+import { PrismaClient, Prisma } from '@prisma/client';
 import { requireRole } from '../../middleware/auth';
 import { AuthenticatedRequest } from '../../middleware/auth';
 
 export const adminProductsRouter = Router();
+const prisma = new PrismaClient();
 
 const productSchema = z.object({
   name: z.string().min(2, 'Nome deve ter pelo menos 2 caracteres').max(100),
@@ -43,7 +44,12 @@ adminProductsRouter.post(
   async (req: AuthenticatedRequest, res: Response) => {
     const data = productSchema.parse(req.body);
 
-    const product = await prisma.product.create({ data });
+    const product = await prisma.product.create({
+  data: {
+    ...data,
+    metadata: data.metadata ?? Prisma.JsonNull,
+  },
+});
 
     res.status(201).json({
       success: true,
@@ -61,7 +67,13 @@ adminProductsRouter.put(
 
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data,
+      data: {
+        ...data,
+        metadata:
+          data.metadata === undefined
+            ? undefined
+            : data.metadata ?? Prisma.JsonNull,
+      },
     });
 
     res.json({
