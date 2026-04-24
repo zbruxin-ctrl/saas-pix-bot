@@ -1,20 +1,16 @@
 // Rota de webhook do Mercado Pago
-// Recebe notificações de pagamentos aprovados/rejeitados
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { paymentService } from '../services/paymentService';
 import { mercadoPagoService } from '../services/mercadoPagoService';
 import { webhookRateLimit } from '../middleware/rateLimit';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
-import { PrismaClient, Prisma } from '@prisma/client';
-
-const prisma = new PrismaClient();
 
 export const webhooksRouter = Router();
 
-// Tipos de eventos que processamos
 const HANDLED_EVENTS = ['payment'];
 const APPROVED_STATUS = 'approved';
 
@@ -23,7 +19,6 @@ webhooksRouter.post(
   '/mercadopago',
   webhookRateLimit,
   async (req: Request, res: Response) => {
-    // O body vem como Buffer (definido no index.ts)
     const rawBody = req.body as Buffer;
     const bodyString = rawBody.toString('utf-8');
 
@@ -37,36 +32,30 @@ webhooksRouter.post(
       return;
     }
 
-    // Valida assinatura HMAC do Mercado Pago
     const isValid = validateWebhookSignature(req, bodyString);
     if (!isValid) {
       logger.warn('Webhook: assinatura inválida', {
         headers: req.headers,
         ip: req.ip,
       });
-      // Retorna 200 para evitar reenvios, mas não processa
       res.status(200).json({ status: 'ignored' });
       return;
     }
 
-    // Extrai dados do evento
     const eventType = payload.type as string;
     const dataId = (payload.data as { id?: string })?.id;
     const action = payload.action as string;
 
     logger.info(`Webhook recebido: tipo=${eventType} | action=${action} | id=${dataId}`);
 
-    // Retorna 200 imediatamente (MP exige resposta rápida)
     res.status(200).json({ status: 'received' });
 
-    // Processa assincronamente (não bloqueia a resposta)
     processWebhookAsync(eventType, dataId, payload).catch((error) => {
       logger.error('Erro no processamento assíncrono do webhook:', error);
     });
   }
 );
 
-// Processa o webhook de forma assíncrona
 async function processWebhookAsync(
   eventType: string,
   externalId: string | undefined,
@@ -77,13 +66,11 @@ async function processWebhookAsync(
     return;
   }
 
-  // Apenas processa eventos de pagamento
   if (!HANDLED_EVENTS.includes(eventType)) {
     logger.info(`Webhook: tipo ${eventType} ignorado`);
     return;
   }
 
-  // Verifica idempotência: ignora se já processamos este evento
   const existingEvent = await prisma.webhookEvent.findUnique({
     where: {
       provider_externalId_eventType: {
@@ -99,7 +86,6 @@ async function processWebhookAsync(
     return;
   }
 
-  // Cria ou atualiza o evento de webhook
   const webhookEvent = await prisma.webhookEvent.upsert({
     where: {
       provider_externalId_eventType: {
@@ -114,19 +100,15 @@ async function processWebhookAsync(
       eventType,
       externalId,
       rawPayload: rawPayload as unknown as Prisma.InputJsonValue,
-      rawPayload,
       status: 'PROCESSING',
     },
   });
 
   try {
-    // Busca detalhes do pagamento no Mercado Pago
     const mpPayment = await mercadoPagoService.getPaymentById(externalId);
 
-    // Só processa pagamentos aprovados
     if (mpPayment.status !== APPROVED_STATUS) {
       logger.info(`Webhook: pagamento ${externalId} com status ${mpPayment.status}. Ignorando.`);
-
       await prisma.webhookEvent.update({
         where: { id: webhookEvent.id },
         data: { status: 'IGNORED', processedAt: new Date() },
@@ -134,12 +116,10 @@ async function processWebhookAsync(
       return;
     }
 
-    // Busca o pagamento interno pela referência externa do MP
     const internalPayment = await prisma.payment.findUnique({
       where: { mercadoPagoId: externalId },
     });
 
-    // Tenta também pela external_reference (ID interno)
     const paymentByRef = internalPayment || await prisma.payment.findUnique({
       where: { id: mpPayment.external_reference },
     });
@@ -153,16 +133,13 @@ async function processWebhookAsync(
       return;
     }
 
-    // Vincula o evento ao pagamento interno
     await prisma.webhookEvent.update({
       where: { id: webhookEvent.id },
       data: { paymentId: paymentByRef.id },
     });
 
-    // Processa o pagamento aprovado
     await paymentService.processApprovedPayment(paymentByRef.id);
 
-    // Marca evento como processado
     await prisma.webhookEvent.update({
       where: { id: webhookEvent.id },
       data: { status: 'PROCESSED', processedAt: new Date() },
@@ -177,15 +154,12 @@ async function processWebhookAsync(
     await prisma.webhookEvent.update({
       where: { id: webhookEvent.id },
       data: { status: 'FAILED', error: errorMsg, processedAt: new Date() },
-    });
+    }).catch(() => {});
   }
 }
 
-// Valida a assinatura HMAC do Mercado Pago
-// Documentação: https://www.mercadopago.com.br/developers/pt/docs/your-integrations/notifications/webhooks
 function validateWebhookSignature(req: Request, body: string): boolean {
   try {
-    // Em desenvolvimento, aceita sem validar
     if (env.NODE_ENV === 'development') {
       return true;
     }
@@ -193,23 +167,17 @@ function validateWebhookSignature(req: Request, body: string): boolean {
     const xSignature = req.headers['x-signature'] as string;
     const xRequestId = req.headers['x-request-id'] as string;
 
-    if (!xSignature || !xRequestId) {
-      return false;
-    }
+    if (!xSignature || !xRequestId) return false;
 
-    // Extrai ts e v1 da header x-signature
     const parts = xSignature.split(',');
     const tsPart = parts.find((p) => p.startsWith('ts='));
     const v1Part = parts.find((p) => p.startsWith('v1='));
 
-    if (!tsPart || !v1Part) {
-      return false;
-    }
+    if (!tsPart || !v1Part) return false;
 
     const ts = tsPart.split('=')[1];
     const signature = v1Part.split('=')[1];
 
-    // Monta a string para verificação conforme documentação do MP
     const manifest = `id:${(req.query.id as string) || ''};request-id:${xRequestId};ts:${ts};`;
 
     const expectedSignature = crypto

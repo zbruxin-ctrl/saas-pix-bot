@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '@prisma/client';
+import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
 
 export const adminProductsRouter = Router();
@@ -74,7 +74,7 @@ adminProductsRouter.put(
   }
 );
 
-// DELETE
+// DELETE (soft delete)
 adminProductsRouter.delete(
   '/:id',
   requireRole('SUPER_ADMIN'),
