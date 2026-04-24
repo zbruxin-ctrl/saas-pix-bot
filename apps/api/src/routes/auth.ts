@@ -60,7 +60,7 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
   res.cookie('auth_token', token, {
   httpOnly: true,
   secure: true,
-  sameSite: 'none',
+  sameSite: 'none' as const,,
   ...
     maxAge: 7 * 24 * 60 * 60 * 1000,
     signed: true,
@@ -70,7 +70,7 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
   res.cookie('auth_presence', '1', {
     httpOnly: false,
     secure: true,
-    sameSite: 'none',
+    sameSite: 'none' as const,,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
@@ -87,8 +87,8 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
 
 // POST /api/auth/logout
 authRouter.post('/logout', requireAuth, (_req: Request, res: Response) => {
-  res.clearCookie('auth_token', { secure: true, sameSite: 'none' });
-  res.clearCookie('auth_presence', { secure: true, sameSite: 'none' });
+  res.clearCookie('auth_token', { secure: true, sameSite: 'none' as const, });
+  res.clearCookie('auth_presence', { secure: true, sameSite: 'none' as const, });
   res.json({ success: true, message: 'Logout realizado com sucesso' });
 });
 
