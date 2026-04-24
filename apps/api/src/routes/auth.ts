@@ -57,12 +57,11 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
 
   // Cookie httpOnly com JWT real (protegido contra XSS)
   // Em desenvolvimento usa 'lax' para funcionar entre portas diferentes (3000 -> 3001)
-  const sameSite = env.NODE_ENV === 'production' ? 'strict' : 'lax';
-
   res.cookie('auth_token', token, {
-    httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite,
+  httpOnly: true,
+  secure: true,
+  sameSite: 'none',
+  ...
     maxAge: 7 * 24 * 60 * 60 * 1000,
     signed: true,
   });
@@ -70,8 +69,8 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
   // Cookie não-httpOnly para o middleware Next.js detectar sessão ativa
   res.cookie('auth_presence', '1', {
     httpOnly: false,
-    secure: env.NODE_ENV === 'production',
-    sameSite,
+    secure: true,
+    sameSite: 'none',
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
@@ -88,8 +87,8 @@ authRouter.post('/login', loginRateLimit, async (req: Request, res: Response) =>
 
 // POST /api/auth/logout
 authRouter.post('/logout', requireAuth, (_req: Request, res: Response) => {
-  res.clearCookie('auth_token');
-  res.clearCookie('auth_presence');
+  res.clearCookie('auth_token', { secure: true, sameSite: 'none' });
+  res.clearCookie('auth_presence', { secure: true, sameSite: 'none' });
   res.json({ success: true, message: 'Logout realizado com sucesso' });
 });
 
