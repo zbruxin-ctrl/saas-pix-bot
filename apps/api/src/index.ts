@@ -32,9 +32,9 @@ const fixedOrigins = env.NODE_ENV === 'development'
 // Função que valida origem dinamicamente
 // Aceita origens fixas + qualquer subdomínio *.vercel.app (previews e deployments)
 function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return false;
+  // ✅ Permite chamadas servidor-a-servidor (proxy Next.js não envia Origin)
+  if (!origin) return true;
   if (fixedOrigins.includes(origin)) return true;
-  // Aceita qualquer deployment/preview do Vercel do mesmo projeto
   if (origin.endsWith('.vercel.app')) return true;
   return false;
 }
