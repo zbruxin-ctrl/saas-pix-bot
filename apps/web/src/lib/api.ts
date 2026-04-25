@@ -63,7 +63,7 @@ export async function deleteProduct(id: string) {
 
 // ─── Payments ────────────────────────────────────────────────────────────────
 
-export async function getPayments(params?: Record<string, string | number>) {
+export async function getPayments(params?: Record<string, string | number | undefined>) {
   const res = await api.get('/admin/payments', { params });
   return res.data?.data ?? res.data;
 }
