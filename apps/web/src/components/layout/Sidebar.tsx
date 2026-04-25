@@ -1,18 +1,34 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { useState } from 'react';
 import clsx from 'clsx';
 
 const navItems = [
-  { href: '/admin', label: 'Dashboard', icon: '📊', exact: true },
-  { href: '/admin/payments', label: 'Pagamentos', icon: '💳', exact: false },
-  { href: '/admin/products', label: 'Produtos', icon: '📦', exact: false },
-  { href: '/admin/users', label: 'Usuários', icon: '👥', exact: false },
+  { href: '/admin',          label: 'Dashboard',   icon: '📊', exact: true  },
+  { href: '/admin/payments', label: 'Pagamentos',  icon: '💳', exact: false },
+  { href: '/admin/products', label: 'Produtos',    icon: '📦', exact: false },
+  { href: '/admin/users',    label: 'Usuários',    icon: '👥', exact: false },
 ];
 
 export default function Sidebar() {
-  const pathname = usePathname();
+  const pathname  = usePathname();
+  const router    = useRouter();
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function handleLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch (_) {
+      // ignora erros de rede — cookie já foi removido
+    } finally {
+      // Força reload completo para limpar estado do Next.js e do middleware
+      window.location.replace('/login');
+    }
+  }
 
   return (
     <aside className="w-64 bg-white border-r border-gray-100 flex flex-col flex-shrink-0">
@@ -54,23 +70,16 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Rodapé */}
+      {/* Rodapé — logout */}
       <div className="px-3 py-4 border-t border-gray-100">
-        <form action="/api/auth/logout" method="POST">
-          <Link
-            href="/api/auth/logout"
-            onClick={async (e) => {
-              e.preventDefault();
-              const { logout } = await import('@/lib/api');
-              await logout();
-              window.location.href = '/login';
-            }}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors w-full"
-          >
-            <span>🚪</span>
-            Sair
-          </Link>
-        </form>
+        <button
+          onClick={handleLogout}
+          disabled={loggingOut}
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors w-full disabled:opacity-50"
+        >
+          <span>🚪</span>
+          {loggingOut ? 'Saindo...' : 'Sair'}
+        </button>
       </div>
     </aside>
   );
