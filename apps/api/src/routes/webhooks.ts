@@ -178,7 +178,8 @@ function validateWebhookSignature(req: Request, body: string): boolean {
     const ts = tsPart.split('=')[1];
     const signature = v1Part.split('=')[1];
 
-    const manifest = `id:${(req.query.id as string) || ''};request-id:${xRequestId};ts:${ts};`;
+    const dataId = (req.query['data.id'] as string) || (req.query.id as string) || '';
+    const manifest = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
 
     const expectedSignature = crypto
       .createHmac('sha256', env.MERCADO_PAGO_WEBHOOK_SECRET)
