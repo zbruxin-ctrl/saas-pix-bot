@@ -1,53 +1,71 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
 
-const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME!;
-const API_KEY = process.env.CLOUDINARY_API_KEY!;
-const API_SECRET = process.env.CLOUDINARY_API_SECRET!;
+const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
+const API_KEY = process.env.CLOUDINARY_API_KEY;
+const API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
-function getSignature(paramsToSign: Record<string, string>, apiSecret: string) {
-  const crypto = require('crypto');
-  const signatureBase = Object.entries(paramsToSign)
+function sign(params: Record<string, string>, apiSecret: string) {
+  const toSign = Object.entries(params)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([k, v]) => `${k}=${v}`)
     .join('&');
 
   return crypto
     .createHash('sha1')
-    .update(signatureBase + apiSecret)
+    .update(toSign + apiSecret)
     .digest('hex');
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const formData = await req.formData();
-    const file = formData.get('file') as File | null;
-    const mediaType = String(formData.get('mediaType') || 'IMAGE');
-
-    if (!file) {
-      return NextResponse.json({ error: 'Arquivo não enviado.' }, { status: 400 });
+    if (!CLOUD_NAME || !API_KEY || !API_SECRET) {
+      return NextResponse.json(
+        { error: 'Cloudinary não configurado no ambiente.' },
+        { status: 500 }
+      );
     }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
+    const formData = await req.formData();
+    const file = formData.get('file');
+    const mediaType = String(formData.get('mediaType') || 'IMAGE');
+
+    if (!(file instanceof File)) {
+      return NextResponse.json(
+        { error: 'Arquivo inválido ou não enviado.' },
+        { status: 400 }
+      );
+    }
+
+    const maxSizeByType: Record<string, number> = {
+      IMAGE: 10 * 1024 * 1024,
+      VIDEO: 50 * 1024 * 1024,
+      FILE: 20 * 1024 * 1024,
+    };
+
+    const maxSize = maxSizeByType[mediaType] ?? 10 * 1024 * 1024;
+    if (file.size > maxSize) {
+      return NextResponse.json(
+        { error: `Arquivo muito grande para ${mediaType}.` },
+        { status: 400 }
+      );
+    }
 
     const timestamp = String(Math.floor(Date.now() / 1000));
+    const folder = 'saas-pix-bot/products';
 
     let resourceType = 'image';
     if (mediaType === 'VIDEO') resourceType = 'video';
     if (mediaType === 'FILE') resourceType = 'raw';
 
-    const paramsToSign = {
-      timestamp,
-      folder: 'saas-pix-bot/products',
-    };
-
-    const signature = getSignature(paramsToSign, API_SECRET);
+    const paramsToSign = { timestamp, folder };
+    const signature = sign(paramsToSign, API_SECRET);
 
     const cloudinaryForm = new FormData();
-    cloudinaryForm.append('file', new Blob([buffer]), file.name);
+    cloudinaryForm.append('file', file);
     cloudinaryForm.append('api_key', API_KEY);
     cloudinaryForm.append('timestamp', timestamp);
-    cloudinaryForm.append('folder', 'saas-pix-bot/products');
+    cloudinaryForm.append('folder', folder);
     cloudinaryForm.append('signature', signature);
 
     const uploadRes = await fetch(
@@ -62,7 +80,7 @@ export async function POST(req: NextRequest) {
 
     if (!uploadRes.ok) {
       return NextResponse.json(
-        { error: data?.error?.message || 'Erro ao enviar para o Cloudinary.' },
+        { error: data?.error?.message || 'Erro ao fazer upload no Cloudinary.' },
         { status: 400 }
       );
     }
@@ -73,6 +91,7 @@ export async function POST(req: NextRequest) {
       publicId: data.public_id,
       resourceType: data.resource_type,
       originalFilename: data.original_filename,
+      bytes: data.bytes,
     });
   } catch (error) {
     return NextResponse.json(
