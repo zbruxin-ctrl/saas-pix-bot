@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import {
   getProducts,
   createProduct,
@@ -8,6 +8,7 @@ import {
   deleteProduct,
   getProductMedias,
   updateProductMedias,
+  uploadMediaFile,
   type ProductMedia,
 } from '@/lib/api';
 import { formatCurrency } from '@/lib/utils';
@@ -43,6 +44,12 @@ const MEDIA_TYPES: { value: ProductMedia['mediaType']; label: string }[] = [
   { value: 'VIDEO', label: '🎬 Vídeo'  },
   { value: 'FILE',  label: '📎 Arquivo' },
 ];
+
+const ACCEPT_BY_TYPE: Record<ProductMedia['mediaType'], string> = {
+  IMAGE: 'image/jpeg,image/png,image/gif,image/webp',
+  VIDEO: 'video/mp4,video/webm,video/ogg',
+  FILE: '*/*',
+};
 
 const EMPTY_FORM = {
   name: '',
@@ -99,6 +106,132 @@ function validate(form: typeof EMPTY_FORM, items: DeliveryItem[]): string | null
   }
 
   return null;
+}
+
+interface MediaRowProps {
+  media: ProductMedia;
+  idx: number;
+  onUpdate: (idx: number, patch: Partial<ProductMedia>) => void;
+  onRemove: (idx: number) => void;
+}
+
+function MediaRow({ media, idx, onUpdate, onRemove }: MediaRowProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+
+    try {
+      const dataUrl = await uploadMediaFile(file);
+      onUpdate(idx, { url: dataUrl });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Erro ao fazer upload';
+      toast(msg, 'error');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  const isDataUrl = media.url.startsWith('data:');
+
+  return (
+    <div className="border border-gray-200 rounded-xl p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-gray-500">Mídia {idx + 1}</span>
+        <button
+          type="button"
+          onClick={() => onRemove(idx)}
+          className="text-red-400 hover:text-red-600 text-sm"
+        >
+          Remover
+        </button>
+      </div>
+
+      <select
+        className="input text-sm"
+        value={media.mediaType}
+        onChange={(e) => onUpdate(idx, { mediaType: e.target.value as ProductMedia['mediaType'] })}
+      >
+        {MEDIA_TYPES.map((t) => (
+          <option key={t.value} value={t.value}>{t.label}</option>
+        ))}
+      </select>
+
+      <div className="flex gap-2 items-center">
+        {isDataUrl ? (
+          <div className="flex-1 input bg-green-50 text-green-700 text-sm truncate select-none">
+            {media.mediaType === 'IMAGE'
+              ? '🖼 Imagem carregada'
+              : media.mediaType === 'VIDEO'
+              ? '🎬 Vídeo carregado'
+              : '📎 Arquivo carregado'}
+          </div>
+        ) : (
+          <input
+            className="flex-1 input text-sm"
+            placeholder="URL pública da mídia"
+            value={media.url}
+            onChange={(e) => onUpdate(idx, { url: e.target.value })}
+          />
+        )}
+
+        <button
+          type="button"
+          title="Enviar arquivo do computador"
+          disabled={uploading}
+          onClick={() => fileInputRef.current?.click()}
+          className="shrink-0 flex items-center gap-1 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {uploading ? (
+            <span className="animate-spin">⏳</span>
+          ) : (
+            <>
+              📁 <span className="hidden sm:inline">Upload</span>
+            </>
+          )}
+        </button>
+
+        {media.url && (
+          <button
+            type="button"
+            title="Limpar"
+            onClick={() => onUpdate(idx, { url: '' })}
+            className="shrink-0 text-gray-400 hover:text-red-500 text-lg leading-none px-1"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={ACCEPT_BY_TYPE[media.mediaType]}
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {isDataUrl && media.mediaType === 'IMAGE' && (
+        <img
+          src={media.url}
+          alt="preview"
+          className="w-full max-h-32 object-contain rounded-lg bg-gray-50"
+        />
+      )}
+
+      <input
+        className="input text-sm"
+        placeholder="Legenda (opcional)"
+        value={media.caption ?? ''}
+        onChange={(e) => onUpdate(idx, { caption: e.target.value })}
+      />
+    </div>
+  );
 }
 
 export default function ProductsPage() {
@@ -169,27 +302,24 @@ export default function ProductsPage() {
     setFieldError('');
     setActiveTab('product');
     setShowModal(true);
-    // Carrega mídias existentes (assíncrono, não bloqueia abertura do modal)
+
     getProductMedias(p.id)
       .then(setMedias)
       .catch(() => setMedias([]));
   }
 
-  // ─── Itens de entrega ────────────────────────────────────────────────────────
   function addItem() { setItems((prev) => [...prev, newItem()]); }
   function removeItem(id: string) { setItems((prev) => prev.filter((i) => i.id !== id)); }
   function updateItemValue(id: string, value: string) {
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, value } : i)));
   }
 
-  // ─── Mídias extras ───────────────────────────────────────────────────────────
   function addMedia() { setMedias((prev) => [...prev, newMedia()]); }
   function removeMedia(idx: number) { setMedias((prev) => prev.filter((_, i) => i !== idx)); }
   function updateMedia(idx: number, patch: Partial<ProductMedia>) {
     setMedias((prev) => prev.map((m, i) => (i === idx ? { ...m, ...patch } : m)));
   }
 
-  // ─── Salvar ──────────────────────────────────────────────────────────────────
   async function handleSave() {
     const err = validate(form, items);
     if (err) { setFieldError(err); setActiveTab('product'); return; }
@@ -202,7 +332,6 @@ export default function ProductsPage() {
         ? itemsToContent(items)
         : form.deliveryContent;
 
-      // FIFO: estoque = número de itens preenchidos
       const fifoCount = usesItemList
         ? items.filter((i) => i.value.trim()).length
         : null;
@@ -226,7 +355,6 @@ export default function ProductsPage() {
         toast('Produto criado com sucesso!', 'success');
       }
 
-      // Salva mídias extras
       if (savedId) {
         const validMedias = medias.filter((m) => m.url.trim());
         await updateProductMedias(savedId, validMedias).catch(() =>
@@ -261,7 +389,6 @@ export default function ProductsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Produtos</h1>
@@ -272,7 +399,6 @@ export default function ProductsPage() {
         <button onClick={openCreate} className="btn-primary">+ Novo Produto</button>
       </div>
 
-      {/* Filtros */}
       <div className="flex flex-col sm:flex-row gap-3">
         <input
           className="input flex-1"
@@ -298,7 +424,6 @@ export default function ProductsPage() {
         </div>
       </div>
 
-      {/* Lista */}
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {[...Array(6)].map((_, i) => (
@@ -374,11 +499,9 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {/* Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            {/* Cabeçalho com abas */}
             <div className="px-6 pt-6 pb-0">
               <h2 className="text-xl font-bold text-gray-900 mb-4">
                 {editId ? 'Editar Produto' : 'Novo Produto'}
@@ -405,7 +528,6 @@ export default function ProductsPage() {
             </div>
 
             <div className="p-6">
-              {/* ─── Aba Produto ─── */}
               {activeTab === 'product' && (
                 <div className="space-y-4">
                   <div>
@@ -456,7 +578,6 @@ export default function ProductsPage() {
                     </select>
                   </div>
 
-                  {/* Lista FIFO — TEXT, LINK, ACCOUNT */}
                   {usesItemList && (
                     <div>
                       <div className="flex items-center justify-between mb-2">
@@ -505,7 +626,6 @@ export default function ProductsPage() {
                     </div>
                   )}
 
-                  {/* FILE_MEDIA */}
                   {form.deliveryType === 'FILE_MEDIA' && (
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -531,7 +651,6 @@ export default function ProductsPage() {
                 </div>
               )}
 
-              {/* ─── Aba Mídias Extras ─── */}
               {activeTab === 'medias' && (
                 <div className="space-y-4">
                   <p className="text-sm text-gray-500">
@@ -546,46 +665,27 @@ export default function ProductsPage() {
                   ) : (
                     <div className="space-y-3">
                       {medias.map((media, idx) => (
-                        <div key={idx} className="border border-gray-200 rounded-xl p-3 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-gray-500">Mídia {idx + 1}</span>
-                            <button type="button" onClick={() => removeMedia(idx)}
-                              className="text-red-400 hover:text-red-600 text-sm">
-                              Remover
-                            </button>
-                          </div>
-                          <div className="grid grid-cols-3 gap-2">
-                            <select className="input col-span-1 text-sm"
-                              value={media.mediaType}
-                              onChange={(e) => updateMedia(idx, { mediaType: e.target.value as ProductMedia['mediaType'] })}>
-                              {MEDIA_TYPES.map((t) => (
-                                <option key={t.value} value={t.value}>{t.label}</option>
-                              ))}
-                            </select>
-                            <input className="input col-span-2 text-sm"
-                              placeholder="URL pública da mídia"
-                              value={media.url}
-                              onChange={(e) => updateMedia(idx, { url: e.target.value })} />
-                          </div>
-                          <input className="input text-sm"
-                            placeholder="Legenda (opcional)"
-                            value={media.caption ?? ''}
-                            onChange={(e) => updateMedia(idx, { caption: e.target.value })} />
-                        </div>
+                        <MediaRow
+                          key={idx}
+                          media={media}
+                          idx={idx}
+                          onUpdate={updateMedia}
+                          onRemove={removeMedia}
+                        />
                       ))}
                     </div>
                   )}
 
-                  <button type="button" onClick={addMedia}
-                    className="w-full border-2 border-dashed border-gray-200 hover:border-blue-400
-                               text-gray-400 hover:text-blue-500 rounded-xl py-3 text-sm
-                               font-medium transition-colors">
+                  <button
+                    type="button"
+                    onClick={addMedia}
+                    className="w-full border-2 border-dashed border-gray-200 hover:border-blue-400 text-gray-400 hover:text-blue-500 rounded-xl py-3 text-sm font-medium transition-colors"
+                  >
                     + Adicionar mídia
                   </button>
                 </div>
               )}
 
-              {/* Erro */}
               {fieldError && (
                 <div className="mt-4 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm flex items-start gap-2">
                   <span>⚠️</span>
@@ -593,7 +693,6 @@ export default function ProductsPage() {
                 </div>
               )}
 
-              {/* Ações */}
               <div className="flex gap-3 mt-6">
                 <button onClick={() => setShowModal(false)} className="btn-secondary flex-1">Cancelar</button>
                 <button onClick={handleSave} disabled={saving} className="btn-primary flex-1">
