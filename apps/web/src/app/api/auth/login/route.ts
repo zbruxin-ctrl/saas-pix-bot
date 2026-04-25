@@ -17,12 +17,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(data, { status: apiRes.status });
   }
 
-  // Seta cookie de presença no domínio do Vercel
   const response = NextResponse.json(data);
+
+  // Cookie lido pelo middleware Next.js no servidor — deve ser lax/strict, não none
+  // none só funciona cross-site; aqui o middleware e o frontend são o mesmo domínio Vercel
   response.cookies.set('auth_presence', '1', {
-    httpOnly: false,
-    secure: true,
-    sameSite: 'none',
+    httpOnly: false,      // middleware pode ler sem httpOnly no Next.js edge
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',     // lax funciona corretamente em same-site (Vercel)
     maxAge: 7 * 24 * 60 * 60,
     path: '/',
   });

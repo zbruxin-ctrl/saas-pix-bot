@@ -1,11 +1,10 @@
-// Cliente de API para o painel admin (Next.js)
 import axios from 'axios';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export const api = axios.create({
   baseURL: API_URL,
-  withCredentials: true, // envia cookies httpOnly automaticamente
+  withCredentials: true,
 });
 
 // Interceptor: redireciona para login se não autorizado
@@ -19,15 +18,17 @@ api.interceptors.response.use(
   }
 );
 
-// ─── Funções de autenticação ──────────────────────────────────────────────
-
+// ─── Auth ─────────────────────────────────────────────────────────────────
+// login usa axios sem baseURL — chama a rota proxy do Next.js (/api/auth/login)
+// que por sua vez faz proxy para a API e seta o cookie auth_presence
 export async function login(email: string, password: string) {
   const { data } = await axios.post('/api/auth/login', { email, password });
   return data.data;
 }
 
+// logout chama a rota proxy do Next.js que limpa o cookie auth_presence
 export async function logout() {
-  await api.post('/api/auth/logout');
+  await axios.post('/api/auth/logout');
 }
 
 export async function getMe() {
@@ -36,14 +37,12 @@ export async function getMe() {
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────
-
 export async function getDashboard() {
   const { data } = await api.get('/api/admin/dashboard');
   return data.data;
 }
 
 // ─── Pagamentos ───────────────────────────────────────────────────────────
-
 export async function getPayments(params?: {
   page?: number;
   perPage?: number;
@@ -62,7 +61,6 @@ export async function getPayment(id: string) {
 }
 
 // ─── Produtos ─────────────────────────────────────────────────────────────
-
 export async function getProducts() {
   const { data } = await api.get('/api/admin/products');
   return data.data;
@@ -84,7 +82,6 @@ export async function deleteProduct(id: string) {
 }
 
 // ─── Usuários ─────────────────────────────────────────────────────────────
-
 export async function getUsers(params?: { page?: number; search?: string }) {
   const { data } = await api.get('/api/admin/users', { params });
   return data.data;

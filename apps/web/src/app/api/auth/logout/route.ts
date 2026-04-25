@@ -1,24 +1,29 @@
 import { NextResponse } from 'next/server';
 
-export async function POST() {
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
+export async function POST(request: Request) {
+  // Tenta invalidar sessão na API backend (ignora falhas — logout local sempre ocorre)
   try {
-    // Chama o logout no backend para invalidar o token
+    const cookie = request.headers.get('cookie') || '';
     await fetch(`${API_URL}/api/auth/logout`, {
       method: 'POST',
+      headers: { cookie },
       credentials: 'include',
     });
   } catch (_) {
-    // Continua mesmo se o backend falhar
+    // silencia erros de rede — logout local continua
   }
 
-  // Remove o cookie de presença no Next.js (não-httpOnly)
   const response = NextResponse.json({ ok: true });
+
+  // Remove cookie de presença
   response.cookies.set('auth_presence', '', {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
     maxAge: 0,
     path: '/',
-    sameSite: 'lax',
   });
 
   return response;
