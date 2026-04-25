@@ -29,6 +29,16 @@ async function handler(request: NextRequest, { params }: { params: { path: strin
     init.body = await request.text();
   }
 
+async function handler(request: NextRequest, { params }: { params: { path: string[] } }) {
+  const path = params.path.join('/');
+  const search = request.nextUrl.search;
+  const url = `${API_URL}/api/${path}${search}`;
+
+  console.log('[PROXY]', request.method, url); // ← adicione essa linha
+
+  const cookieHeader = request.headers.get('cookie') || '';
+  // ... resto do código
+  
   const apiRes = await fetch(url, init);
   const data = await apiRes.text();
 
