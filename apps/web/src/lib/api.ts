@@ -1,45 +1,6 @@
 // apps/web/src/lib/api.ts
 import axios from 'axios';
-export async function uploadMediaFile(
-  file: File,
-  mediaType: 'IMAGE' | 'VIDEO' | 'FILE'
-): Promise<string> {
-  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
-  const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
 
-  if (!cloudName || !uploadPreset) {
-    throw new Error('Cloudinary não configurado no frontend.');
-  }
-
-  let resourceType = 'image';
-  if (mediaType === 'VIDEO') resourceType = 'video';
-  if (mediaType === 'FILE') resourceType = 'raw';
-
-  const form = new FormData();
-  form.append('file', file);
-  form.append('upload_preset', uploadPreset);
-  form.append('folder', 'saas-pix-bot/products');
-
-  const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`,
-    {
-      method: 'POST',
-      body: form,
-    }
-  );
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data?.error?.message || 'Erro ao fazer upload no Cloudinary');
-  }
-
-  if (!data?.secure_url) {
-    throw new Error('Upload concluído sem URL retornada');
-  }
-
-  return data.secure_url as string;
-}
 const api = axios.create({
   baseURL: '/api/proxy',
   withCredentials: true,
@@ -173,7 +134,8 @@ export async function updateProductMedias(
 
   return res.data?.data ?? res.data;
 }
-// ─── Upload para storage (Cloudinary via rota do Next) ──────────────────────
+
+// ─── Upload direto para Cloudinary ───────────────────────────────────────────
 
 export async function uploadMediaFile(
   file: File,
