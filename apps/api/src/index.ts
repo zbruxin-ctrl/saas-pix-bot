@@ -21,21 +21,39 @@ const app = express();
 
 app.set('trust proxy', 1);
 
-// ─── Segurança ─────────────────────────────────────────────────────────
+// ─── Segurança ──────────────────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
-const allowedOrigins =
-  env.NODE_ENV === 'development'
-    ? ['http://localhost:3000', env.ADMIN_URL]
-    : [env.ADMIN_URL, env.BOT_WEBHOOK_URL].filter(Boolean) as string[];
+// Origens fixas permitidas (env vars)
+const fixedOrigins = env.NODE_ENV === 'development'
+  ? ['http://localhost:3000', 'http://localhost:3001', env.ADMIN_URL]
+  : [env.ADMIN_URL, env.BOT_WEBHOOK_URL].filter(Boolean) as string[];
+
+// Função que valida origem dinamicamente
+// Aceita origens fixas + qualquer subdomínio *.vercel.app (previews e deployments)
+function isOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return false;
+  if (fixedOrigins.includes(origin)) return true;
+  // Aceita qualquer deployment/preview do Vercel do mesmo projeto
+  if (origin.endsWith('.vercel.app')) return true;
+  return false;
+}
 
 app.use(cors({
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, origin); // reflete a origin exata (obrigatório com credentials)
+    } else {
+      callback(new Error(`CORS: origem não permitida: ${origin}`));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  exposedHeaders: ['Set-Cookie'],
 }));
 
-// ─── Middlewares gerais ────────────────────────────────────────────
+// ─── Middlewares gerais ────────────────────────────────────────────────────────────
 app.use(compression());
 app.use(cookieParser(env.COOKIE_SECRET));
 app.use(morgan('combined', {
@@ -47,7 +65,7 @@ app.use('/api/webhooks', express.raw({ type: 'application/json', limit: '1mb' })
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ─── Rotas ────────────────────────────────────────────────────────
+// ─── Rotas ────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRouter);
 app.use('/api/payments', paymentsRouter);
 app.use('/api/webhooks', webhooksRouter);
@@ -57,10 +75,10 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ─── Handler de erros ───────────────────────────────────────────────
+// ─── Handler de erros ─────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
-// ─── Inicialização ─────────────────────────────────────────────────────
+// ─── Inicialização ───────────────────────────────────────────────────────────────────
 const server = app.listen(env.PORT, () => {
   logger.info(`🚀 API rodando na porta ${env.PORT}`);
   logger.info(`🌍 Ambiente: ${env.NODE_ENV}`);
