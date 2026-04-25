@@ -51,11 +51,12 @@ export async function requireAuth(
     req.admin = { id: admin.id, email: admin.email, role: admin.role };
     next();
   } catch (error) {
+    console.error('[requireAuth] erro:', error);
     if (error instanceof jwt.TokenExpiredError) {
       res.status(401).json({ success: false, error: 'Sessão expirada' });
       return;
     }
-    res.status(401).json({ success: false, error: 'Token inválido' });
+    res.status(500).json({ success: false, error: 'Token inválido', detail: String(error) });
   }
 }
 
