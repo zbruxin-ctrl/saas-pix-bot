@@ -168,6 +168,3 @@ export async function uploadMediaFile(
 
   return data.url as string;
 }
-
-  return data.url as string;
-}
