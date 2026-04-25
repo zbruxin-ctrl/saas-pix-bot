@@ -86,7 +86,7 @@ export async function getMe() {
   return res.data?.data ?? res.data;
 }
 
-// ─── Product Medias (mídias extras enviadas após pagamento aprovado) ──────────
+// ─── Product Medias ──────────────────────────────────────────────────────────
 
 export type ProductMedia = {
   url: string;
@@ -95,15 +95,17 @@ export type ProductMedia = {
 };
 
 export async function getProductMedias(id: string): Promise<ProductMedia[]> {
-  const res = await api.get(`/admin/products/${id}`);
-  const product = res.data?.data ?? res.data;
-  const meta = product?.metadata as Record<string, unknown> | null;
-  return Array.isArray(meta?.medias) ? (meta.medias as ProductMedia[]) : [];
+  try {
+    const res = await api.get(`/admin/products/${id}`);
+    const product = res.data?.data ?? res.data;
+    const meta = product?.metadata as Record<string, unknown> | null;
+    return Array.isArray(meta?.medias) ? (meta.medias as ProductMedia[]) : [];
+  } catch {
+    return [];
+  }
 }
 
-// ✅ CÓDIGO CORRIGIDO
 export async function updateProductMedias(id: string, medias: ProductMedia[]) {
-  // Busca o produto completo para reenviar TODOS os campos no PUT
   const productRes = await api.get(`/admin/products/${id}`);
   const product = productRes.data?.data ?? productRes.data;
   const currentMeta = (product?.metadata as Record<string, unknown> | null) ?? {};
@@ -118,11 +120,16 @@ export async function updateProductMedias(id: string, medias: ProductMedia[]) {
     stock: product.stock ?? null,
     metadata: { ...currentMeta, medias },
   });
+
   return res.data?.data ?? res.data;
 }
 
-// ─── Upload local → base64 data URL ──────────────────────────────────────────
-export async function uploadMediaFile(file: File, mediaType: 'IMAGE' | 'VIDEO' | 'FILE'): Promise<string> {
+// ─── Upload para storage (Cloudinary via rota do Next) ──────────────────────
+
+export async function uploadMediaFile(
+  file: File,
+  mediaType: 'IMAGE' | 'VIDEO' | 'FILE'
+): Promise<string> {
   const form = new FormData();
   form.append('file', file);
   form.append('mediaType', mediaType);
