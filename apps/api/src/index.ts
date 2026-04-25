@@ -9,6 +9,7 @@ import morgan from 'morgan';
 
 import { env } from './config/env';
 import { logger } from './lib/logger';
+import { prisma } from './lib/prisma';
 import { errorHandler } from './middleware/errorHandler';
 import { authRouter } from './routes/auth';
 import { paymentsRouter } from './routes/payments';
@@ -20,7 +21,7 @@ const app = express();
 
 app.set('trust proxy', 1);
 
-// ─── Segurança ─────────────────────────────────────────────────────────────
+// ─── Segurança ─────────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
 const allowedOrigins =
@@ -34,7 +35,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
 }));
 
-// ─── Middlewares gerais ────────────────────────────────────────────────────
+// ─── Middlewares gerais ────────────────────────────────────────────
 app.use(compression());
 app.use(cookieParser(env.COOKIE_SECRET));
 app.use(morgan('combined', {
@@ -46,7 +47,7 @@ app.use('/api/webhooks', express.raw({ type: 'application/json', limit: '1mb' })
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ─── Rotas ─────────────────────────────────────────────────────────────────
+// ─── Rotas ────────────────────────────────────────────────────────
 app.use('/api/auth', authRouter);
 app.use('/api/payments', paymentsRouter);
 app.use('/api/webhooks', webhooksRouter);
@@ -56,26 +57,28 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ─── Handler de erros ─────────────────────────────────────────────────────
+// ─── Handler de erros ───────────────────────────────────────────────
 app.use(errorHandler);
 
-// ─── Inicialização ─────────────────────────────────────────────────────────
+// ─── Inicialização ─────────────────────────────────────────────────────
 const server = app.listen(env.PORT, () => {
   logger.info(`🚀 API rodando na porta ${env.PORT}`);
   logger.info(`🌍 Ambiente: ${env.NODE_ENV}`);
-
-  // Inicia job de expiração de pagamentos
   startExpireJob();
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM recebido. Encerrando servidor...');
+async function shutdown(signal: string) {
+  logger.info(`${signal} recebido. Encerrando servidor...`);
   stopExpireJob();
-  server.close(() => {
+  server.close(async () => {
+    await prisma.$disconnect();
     logger.info('Servidor encerrado.');
     process.exit(0);
   });
-});
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
 
 export default app;
