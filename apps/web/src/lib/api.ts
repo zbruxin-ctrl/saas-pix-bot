@@ -35,7 +35,6 @@ export async function login(email: string, password: string) {
 
 export async function getDashboard() {
   const res = await api.get('/admin/dashboard');
-  // A API envolve em { success: true, data: {...} }
   return res.data?.data ?? res.data;
 }
 
@@ -75,7 +74,7 @@ export async function getPayment(id: string) {
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 
-export async function getUsers(params?: Record<string, string | number>) {
+export async function getUsers(params?: Record<string, string | number | undefined>) {
   const res = await api.get('/admin/users', { params });
   return res.data?.data ?? res.data;
 }
