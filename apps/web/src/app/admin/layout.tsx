@@ -1,5 +1,6 @@
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
+import { ToastContainer } from '@/components/admin/Toast';
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -7,10 +8,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-y-auto p-6">
-          {children}
-        </main>
+        <main className="flex-1 overflow-y-auto p-6">{children}</main>
       </div>
+      <ToastContainer />
     </div>
   );
 }
