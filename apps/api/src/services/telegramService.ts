@@ -1,86 +1,76 @@
-// Serviço para envio de mensagens via Telegram Bot API
+// Serviço de integração com Telegram Bot API
 import axios from 'axios';
-import FormData from 'form-data';
-import { env } from '../config/env';
 import { logger } from '../lib/logger';
+import { env } from '../config/env';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
 
 class TelegramService {
 
-  // Envia mensagem de texto (suporta Markdown)
-  async sendMessage(
-    chatId: string,
-    text: string,
-    options: Record<string, unknown> = {}
-  ): Promise<void> {
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      parse_mode: 'Markdown',
+    });
+  }
+
+  // Envia imagem; se a URL falhar, envia como link de texto
+  async sendPhoto(chatId: string, photoUrl: string, caption?: string): Promise<void> {
     try {
-      await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      await axios.post(`${TELEGRAM_API}/sendPhoto`, {
         chat_id: chatId,
-        text,
+        photo: photoUrl,
+        caption: caption ?? undefined,
         parse_mode: 'Markdown',
-        ...options,
       });
-    } catch (error) {
-      logger.error(`Falha ao enviar mensagem para ${chatId}:`, error);
-      throw new Error('Não foi possível enviar mensagem no Telegram');
+    } catch (err) {
+      logger.warn(`sendPhoto falhou para ${photoUrl}, enviando como link:`, err);
+      const msg = caption ? `${caption}\n📷 ${photoUrl}` : `📷 ${photoUrl}`;
+      await this.sendMessage(chatId, msg);
     }
   }
 
-  // Envia imagem (QR code base64)
-  async sendPhoto(
-    chatId: string,
-    photoBase64: string,
-    caption?: string
-  ): Promise<void> {
-    try {
-      // Converte base64 para buffer para enviar como arquivo
-      const photoBuffer = Buffer.from(photoBase64, 'base64');
+  // Envia vídeo via URL direta (MP4) ou link — Telegram faz player embutido para MP4 direto
+  async sendVideo(chatId: string, videoUrl: string, caption?: string): Promise<void> {
+    const isDirectMp4 = /\.(mp4)(\?|$)/i.test(videoUrl);
 
-      const form = new FormData();
-      form.append('chat_id', chatId);
-      form.append('photo', photoBuffer, {
-        filename: 'qrcode.png',
-        contentType: 'image/png',
-      });
-      if (caption) {
-        form.append('caption', caption);
-        form.append('parse_mode', 'Markdown');
+    if (isDirectMp4) {
+      try {
+        await axios.post(`${TELEGRAM_API}/sendVideo`, {
+          chat_id: chatId,
+          video: videoUrl,
+          caption: caption ?? undefined,
+          parse_mode: 'Markdown',
+          supports_streaming: true,
+        });
+        return;
+      } catch (err) {
+        logger.warn(`sendVideo falhou para ${videoUrl}, enviando como link:`, err);
       }
-
-      await axios.post(`${TELEGRAM_API}/sendPhoto`, form, {
-        headers: form.getHeaders(),
-      });
-    } catch (error) {
-      logger.error(`Falha ao enviar foto para ${chatId}:`, error);
-      // Não lança erro para não quebrar o fluxo
     }
+
+    // YouTube ou outros — envia como link clicável
+    const label = caption ? `${caption}\n` : '';
+    const msg = `${label}🎬 [Assistir vídeo](${videoUrl})`;
+    await this.sendMessage(chatId, msg);
   }
 
-  // Mensagem de confirmação de pagamento (enviada pelo webhook)
-  async sendPaymentConfirmation(
-    chatId: string,
-    productName: string,
-    amount: number
-  ): Promise<void> {
-    const message =
+  async sendPaymentConfirmation(chatId: string, productName: string, amount: number): Promise<void> {
+    const msg =
       `✅ *Pagamento confirmado!*\n\n` +
-      `💰 Valor: R$ ${amount.toFixed(2)}\n` +
-      `📦 Produto: ${productName}\n\n` +
-      `Aguarde um instante enquanto preparamos seu acesso... ⚙️`;
-
-    await this.sendMessage(chatId, message);
+      `📦 *Produto:* ${productName}\n` +
+      `💰 *Valor:* R$ ${amount.toFixed(2)}\n\n` +
+      `Obrigado pela sua compra! 🙏`;
+    await this.sendMessage(chatId, msg);
   }
 
-  // Mensagem de erro na entrega
   async sendDeliveryError(chatId: string): Promise<void> {
-    const message =
-      `⚠️ *Atenção!*\n\n` +
-      `Seu pagamento foi confirmado, mas tivemos um problema ao liberar seu acesso.\n\n` +
-      `Nossa equipe foi notificada e entrará em contato em breve. Pedimos desculpas pelo inconveniente.\n\n` +
-      `Em caso de urgência, entre em contato conosco.`;
-
-    await this.sendMessage(chatId, message);
+    const msg =
+      `⚠️ *Problema na entrega*\n\n` +
+      `Identificamos um problema ao entregar seu pedido.\n` +
+      `Nossa equipe foi notificada e entrará em contato em breve.`;
+    await this.sendMessage(chatId, msg);
   }
 }
 

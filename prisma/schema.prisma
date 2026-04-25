@@ -13,15 +13,15 @@ datasource db {
 // ─── Usuário Admin do Painel ───────────────────────────────────────────────
 
 model AdminUser {
-  id           String   @id @default(cuid())
-  email        String   @unique
+  id           String    @id @default(cuid())
+  email        String    @unique
   passwordHash String
   name         String
   role         AdminRole @default(OPERATOR)
-  isActive     Boolean  @default(true)
+  isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@map("admin_users")
 }
@@ -45,8 +45,9 @@ model TelegramUser {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  payments     Payment[]
-  orders       Order[]
+  payments          Payment[]
+  orders            Order[]
+  stockReservations StockReservation[]
 
   @@map("telegram_users")
 }
@@ -54,29 +55,63 @@ model TelegramUser {
 // ─── Produto / Plano ───────────────────────────────────────────────────────
 
 model Product {
-  id              String        @id @default(cuid())
+  id              String       @id @default(cuid())
   name            String
   description     String
-  price           Decimal       @db.Decimal(10, 2)
+  price           Decimal      @db.Decimal(10, 2)
   deliveryType    DeliveryType
-  deliveryContent String        // texto, link, token ou JSON para múltiplos
-  isActive        Boolean       @default(true)
-  stock           Int?          // null = ilimitado
-  metadata        Json?         // dados extras (ex: dias de acesso)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  deliveryContent String       // texto, link, token ou JSON para múltiplos
+  isActive        Boolean      @default(true)
+  stock           Int?         // null = ilimitado
+  // stockReserved: calculado dinamicamente via StockReservation ativas
+  metadata        Json?        // dados extras (ex: dias de acesso)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
-  payments        Payment[]
-  orders          Order[]
+  payments          Payment[]
+  orders            Order[]
+  stockReservations StockReservation[]
 
   @@map("products")
 }
 
+// DeliveryType simplificado: TEXT | LINK | FILE_MEDIA | ACCOUNT
 enum DeliveryType {
-  TEXT
-  LINK
-  TOKEN
-  ACCOUNT
+  TEXT        // Mensagem de texto simples
+  LINK        // Link de acesso / download
+  FILE_MEDIA  // URL de imagem, vídeo ou arquivo (player embutido no bot)
+  ACCOUNT     // Dados de conta em JSON (usuário/senha/token)
+}
+
+// ─── Reserva Temporária de Estoque ─────────────────────────────────────────
+
+model StockReservation {
+  id             String                  @id @default(cuid())
+  productId      String
+  telegramUserId String
+  paymentId      String?                 @unique
+  quantity       Int                     @default(1)
+  status         StockReservationStatus  @default(ACTIVE)
+  expiresAt      DateTime                // reserva expira em 30 min
+  confirmedAt    DateTime?
+  releasedAt     DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  product      Product      @relation(fields: [productId], references: [id])
+  telegramUser TelegramUser @relation(fields: [telegramUserId], references: [id])
+  payment      Payment?     @relation(fields: [paymentId], references: [id])
+
+  @@index([productId, status])
+  @@index([expiresAt, status])
+  @@index([telegramUserId])
+  @@map("stock_reservations")
+}
+
+enum StockReservationStatus {
+  ACTIVE     // reserva ativa (aguardando pagamento)
+  CONFIRMED  // pagamento aprovado, estoque definitivamente alocado
+  RELEASED   // expirou ou cancelado — estoque devolvido
 }
 
 // ─── Pagamento PIX ────────────────────────────────────────────────────────
@@ -88,22 +123,25 @@ model Payment {
   mercadoPagoId        String?       @unique
   amount               Decimal       @db.Decimal(10, 2)
   status               PaymentStatus @default(PENDING)
-  pixQrCode            String?       @db.Text // base64
-  pixQrCodeText        String?       @db.Text // copia e cola
+  pixQrCode            String?       @db.Text
+  pixQrCodeText        String?       @db.Text
   pixExpiresAt         DateTime?
   approvedAt           DateTime?
+  cancelledAt          DateTime?
   metadata             Json?
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
-  telegramUser         TelegramUser  @relation(fields: [telegramUserId], references: [id])
-  product              Product       @relation(fields: [productId], references: [id])
-  order                Order?
-  webhookEvents        WebhookEvent[]
+  telegramUser      TelegramUser      @relation(fields: [telegramUserId], references: [id])
+  product           Product           @relation(fields: [productId], references: [id])
+  order             Order?
+  webhookEvents     WebhookEvent[]
+  stockReservation  StockReservation?
 
   @@index([telegramUserId])
   @@index([status])
   @@index([mercadoPagoId])
+  @@index([pixExpiresAt, status])
   @@map("payments")
 }
 
@@ -132,6 +170,7 @@ model Order {
   telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id])
   product        Product      @relation(fields: [productId], references: [id])
   deliveryLogs   DeliveryLog[]
+  deliveryMedias DeliveryMedia[]
 
   @@index([telegramUserId])
   @@map("orders")
@@ -141,6 +180,31 @@ enum OrderStatus {
   PROCESSING
   DELIVERED
   FAILED
+  CANCELLED
+}
+
+// ─── Mídia Anexada à Entrega ───────────────────────────────────────────────
+// Permite anexar imagens/vídeos (via URL) a uma entrega específica
+
+model DeliveryMedia {
+  id        String          @id @default(cuid())
+  orderId   String
+  url       String          @db.Text  // URL da imagem/vídeo
+  mediaType DeliveryMediaType
+  caption   String?         @db.Text
+  sortOrder Int             @default(0)
+  createdAt DateTime        @default(now())
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@map("delivery_medias")
+}
+
+enum DeliveryMediaType {
+  IMAGE  // JPG, PNG, WebP, GIF
+  VIDEO  // MP4, YouTube, etc. — player embutido no bot
+  FILE   // PDF, ZIP, outros
 }
 
 // ─── Log de Entrega ────────────────────────────────────────────────────────
@@ -155,7 +219,7 @@ model DeliveryLog {
   metadata  Json?
   createdAt DateTime          @default(now())
 
-  order     Order @relation(fields: [orderId], references: [id])
+  order Order @relation(fields: [orderId], references: [id])
 
   @@index([orderId])
   @@map("delivery_logs")
@@ -170,20 +234,19 @@ enum DeliveryLogStatus {
 // ─── Evento de Webhook ────────────────────────────────────────────────────
 
 model WebhookEvent {
-  id              String              @id @default(cuid())
-  provider        String              @default("mercado_pago")
+  id              String             @id @default(cuid())
+  provider        String             @default("mercado_pago")
   eventType       String
-  externalId      String              // ID do pagamento no MP
+  externalId      String
   paymentId       String?
   rawPayload      Json
-  status          WebhookEventStatus  @default(RECEIVED)
+  status          WebhookEventStatus @default(RECEIVED)
   processedAt     DateTime?
-  error           String?             @db.Text
-  createdAt       DateTime            @default(now())
+  error           String?            @db.Text
+  createdAt       DateTime           @default(now())
 
-  payment         Payment?  @relation(fields: [paymentId], references: [id])
+  payment Payment? @relation(fields: [paymentId], references: [id])
 
-  // Previne processamento duplicado
   @@unique([provider, externalId, eventType])
   @@index([externalId])
   @@map("webhook_events")

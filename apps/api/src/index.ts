@@ -14,38 +14,32 @@ import { authRouter } from './routes/auth';
 import { paymentsRouter } from './routes/payments';
 import { webhooksRouter } from './routes/webhooks';
 import adminRouter from './routes/admin';
+import { startExpireJob, stopExpireJob } from './jobs/expirePayments';
 
 const app = express();
 
 app.set('trust proxy', 1);
+
 // ─── Segurança ─────────────────────────────────────────────────────────────
-app.use(
-  helmet({
-    contentSecurityPolicy: false,
-  })
-);
+app.use(helmet({ contentSecurityPolicy: false }));
 
 const allowedOrigins =
   env.NODE_ENV === 'development'
     ? ['http://localhost:3000', env.ADMIN_URL]
     : [env.ADMIN_URL, env.BOT_WEBHOOK_URL].filter(Boolean) as string[];
 
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  })
-);
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+}));
 
 // ─── Middlewares gerais ────────────────────────────────────────────────────
 app.use(compression());
 app.use(cookieParser(env.COOKIE_SECRET));
-app.use(
-  morgan('combined', {
-    stream: { write: (message) => logger.info(message.trim()) },
-  })
-);
+app.use(morgan('combined', {
+  stream: { write: (message) => logger.info(message.trim()) },
+}));
 
 // Body parser (webhooks precisam raw)
 app.use('/api/webhooks', express.raw({ type: 'application/json', limit: '1mb' }));
@@ -58,7 +52,6 @@ app.use('/api/payments', paymentsRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/admin', adminRouter);
 
-// Health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -70,11 +63,15 @@ app.use(errorHandler);
 const server = app.listen(env.PORT, () => {
   logger.info(`🚀 API rodando na porta ${env.PORT}`);
   logger.info(`🌍 Ambiente: ${env.NODE_ENV}`);
+
+  // Inicia job de expiração de pagamentos
+  startExpireJob();
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM recebido. Encerrando servidor...');
+  stopExpireJob();
   server.close(() => {
     logger.info('Servidor encerrado.');
     process.exit(0);

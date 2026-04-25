@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
 import { deliveryService } from './deliveryService';
 import { telegramService } from './telegramService';
+import { stockService } from './stockService';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { AppError } from '../middleware/errorHandler';
@@ -11,11 +12,10 @@ import type { CreatePaymentRequest, CreatePaymentResponse } from '@saas-pix/shar
 
 export class PaymentService {
 
-  // Cria ou busca usuário Telegram, depois cria pagamento PIX
+  // Cria ou busca usuário Telegram, depois cria pagamento PIX com reserva de estoque
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username } = data;
 
-    // Busca o produto
     const product = await prisma.product.findUnique({
       where: { id: productId, isActive: true },
     });
@@ -24,30 +24,29 @@ export class PaymentService {
       throw new AppError('Produto não encontrado ou indisponível.', 404);
     }
 
-    // Verifica estoque
-    if (product.stock !== null && product.stock <= 0) {
-      throw new AppError('Produto esgotado no momento. Tente novamente mais tarde.', 409);
+    // Verifica estoque disponível (descontando reservas ativas)
+    const available = await stockService.getAvailableStock(productId);
+    if (available !== null && available <= 0) {
+      throw new AppError('Produto esgotado no momento. Tente novamente em alguns minutos.', 409);
     }
 
-    // Cria ou atualiza usuário Telegram
     const telegramUser = await prisma.telegramUser.upsert({
       where: { telegramId },
       update: { firstName, username },
       create: { telegramId, firstName, username },
     });
 
-    // Verifica se já existe pagamento pendente para este usuário/produto
+    // Reutiliza pagamento pendente ainda válido
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
         productId,
         status: PaymentStatus.PENDING,
-        pixExpiresAt: { gt: new Date() }, // ainda não expirou
+        pixExpiresAt: { gt: new Date() },
       },
     });
 
     if (existingPending) {
-      // Retorna o pagamento pendente existente
       logger.info(`Pagamento pendente reutilizado: ${existingPending.id}`);
       return {
         paymentId: existingPending.id,
@@ -59,33 +58,37 @@ export class PaymentService {
       };
     }
 
-    // Cria pagamento no banco primeiro (para ter o ID como referência)
+    // Cria pagamento no banco primeiro
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
         productId: product.id,
         amount: product.price,
         status: PaymentStatus.PENDING,
-        metadata: {
-          firstName,
-          username,
-          productName: product.name,
-        },
+        metadata: { firstName, username, productName: product.name },
       },
     });
 
+    // Reserva estoque imediatamente (antes de ir ao MP)
+    if (product.stock !== null) {
+      try {
+        await stockService.reserveStock(productId, telegramUser.id, payment.id);
+      } catch (err) {
+        await prisma.payment.delete({ where: { id: payment.id } });
+        throw err;
+      }
+    }
+
     try {
-      // Cria PIX no Mercado Pago
       const mpPayment = await mercadoPagoService.createPixPayment({
         transactionAmount: Number(product.price),
         description: `${product.name} - SaaS PIX Bot`,
         payerEmail: `${telegramId}@telegram.user`,
         payerName: firstName || username || 'Usuário Telegram',
-        externalReference: payment.id, // ID interno como referência
+        externalReference: payment.id,
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
       });
 
-      // Atualiza pagamento com dados do MP
       const updatedPayment = await prisma.payment.update({
         where: { id: payment.id },
         data: {
@@ -108,39 +111,32 @@ export class PaymentService {
         productName: product.name,
       };
     } catch (error) {
-      // Remove pagamento se falhou no MP
+      // Reverte: remove pagamento e libera reserva
+      await stockService.releaseReservation(payment.id, 'falha_criacao_mp');
       await prisma.payment.delete({ where: { id: payment.id } });
       throw error;
     }
   }
 
-  // Processa confirmação de pagamento aprovado (chamado pelo webhook)
+  // Processa pagamento aprovado (chamado pelo webhook)
   async processApprovedPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      include: {
-        product: true,
-        telegramUser: true,
-        order: true,
-      },
+      include: { product: true, telegramUser: true, order: true },
     });
 
-    if (!payment) {
-      throw new AppError('Pagamento não encontrado', 404);
-    }
+    if (!payment) throw new AppError('Pagamento não encontrado', 404);
 
-    // Idempotência: não processa se já foi aprovado
     if (payment.status === PaymentStatus.APPROVED) {
       logger.info(`Pagamento ${paymentId} já processado. Ignorando.`);
       return;
     }
 
     if (payment.status !== PaymentStatus.PENDING) {
-      logger.warn(`Pagamento ${paymentId} está com status ${payment.status}. Ignorando.`);
+      logger.warn(`Pagamento ${paymentId} com status ${payment.status}. Ignorando.`);
       return;
     }
 
-    // Verifica no Mercado Pago se o pagamento realmente foi aprovado
     const { isApproved } = await mercadoPagoService.verifyPayment(
       payment.mercadoPagoId!,
       Number(payment.amount)
@@ -151,26 +147,12 @@ export class PaymentService {
       return;
     }
 
-    // Atualiza status do pagamento e cria pedido em transação
     const order = await prisma.$transaction(async (tx) => {
-      // Atualiza pagamento
       await tx.payment.update({
         where: { id: paymentId },
-        data: {
-          status: PaymentStatus.APPROVED,
-          approvedAt: new Date(),
-        },
+        data: { status: PaymentStatus.APPROVED, approvedAt: new Date() },
       });
 
-      // Decrementa estoque se necessário
-      if (payment.product.stock !== null) {
-        await tx.product.update({
-          where: { id: payment.productId },
-          data: { stock: { decrement: 1 } },
-        });
-      }
-
-      // Cria pedido
       const newOrder = await tx.order.create({
         data: {
           paymentId: payment.id,
@@ -183,10 +165,10 @@ export class PaymentService {
       return newOrder;
     });
 
-    // Entrega o produto via Telegram (fora da transação)
-    await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
+    // Confirma reserva e decrementa estoque definitivamente
+    await stockService.confirmReservation(paymentId);
 
-    // Notifica o usuário sobre o pagamento aprovado
+    await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
     await telegramService.sendPaymentConfirmation(
       payment.telegramUser.telegramId,
       payment.product.name,
@@ -194,16 +176,45 @@ export class PaymentService {
     );
   }
 
-  // Busca status de um pagamento pelo ID interno
+  // Cancela pagamento expirado e libera estoque
+  async cancelExpiredPayment(paymentId: string): Promise<void> {
+    const payment = await prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: { telegramUser: true },
+    });
+
+    if (!payment || payment.status !== PaymentStatus.PENDING) return;
+
+    await prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: PaymentStatus.EXPIRED,
+        cancelledAt: new Date(),
+      },
+    });
+
+    await stockService.releaseReservation(paymentId, 'pagamento_expirado');
+
+    logger.info(`Pagamento ${paymentId} marcado como EXPIRADO e estoque liberado`);
+
+    // Notifica o usuário no Telegram
+    try {
+      await telegramService.sendMessage(
+        payment.telegramUser.telegramId,
+        `⏰ *Pagamento expirado*\n\nSeu PIX não foi confirmado em 30 minutos e foi cancelado automaticamente.\n\nFique à vontade para tentar novamente! 😊`
+      );
+    } catch {
+      logger.warn(`Não foi possível notificar usuário ${payment.telegramUser.telegramId} sobre expiração`);
+    }
+  }
+
   async getPaymentStatus(paymentId: string): Promise<{ status: PaymentStatus; paymentId: string }> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
       select: { id: true, status: true },
     });
 
-    if (!payment) {
-      throw new AppError('Pagamento não encontrado', 404);
-    }
+    if (!payment) throw new AppError('Pagamento não encontrado', 404);
 
     return { status: payment.status, paymentId: payment.id };
   }
