@@ -7,12 +7,23 @@ export const api = axios.create({
   withCredentials: true,
 });
 
-// Interceptor: redireciona para login se não autorizado
+// Interceptor: ao receber 401, limpa o cookie de presença e manda para /login
 api.interceptors.response.use(
   (r) => r,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401 && typeof window !== 'undefined') {
-      window.location.href = '/login';
+      // Remove cookie de presença do lado do cliente
+      document.cookie = 'auth_presence=; Path=/; Max-Age=0; SameSite=Lax';
+      document.cookie = 'auth_presence=; Path=/; Max-Age=0; SameSite=Lax; Secure';
+
+      // Chama rota de logout para limpar o httpOnly token no servidor
+      try {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      } catch (_) {
+        // ignora erro de rede — o cookie de presença já foi removido
+      }
+
+      window.location.replace('/login');
     }
     return Promise.reject(error);
   }
