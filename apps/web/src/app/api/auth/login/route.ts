@@ -19,14 +19,19 @@ export async function POST(request: NextRequest) {
 
   const response = NextResponse.json(data);
 
-  // Cookie lido pelo middleware Next.js no servidor — deve ser lax/strict, não none
-  // none só funciona cross-site; aqui o middleware e o frontend são o mesmo domínio Vercel
+  // Lê o host da requisição para setar o cookie no domínio correto.
+  // Isso garante que funciona tanto no alias (saas-pix-bot.vercel.app)
+  // quanto no deployment direto (saas-pix-xxx.vercel.app).
+  const host = request.headers.get('host') || '';
+  const domain = host.split(':')[0]; // remove porta se houver
+
   response.cookies.set('auth_presence', '1', {
-    httpOnly: false,      // middleware pode ler sem httpOnly no Next.js edge
+    httpOnly: false,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',     // lax funciona corretamente em same-site (Vercel)
+    sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60,
     path: '/',
+    domain: domain || undefined,
   });
 
   return response;
