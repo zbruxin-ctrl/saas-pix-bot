@@ -24,9 +24,29 @@ adminProductsRouter.get('/', async (_req, res: Response) => {
   const products = await prisma.product.findMany({
     orderBy: { createdAt: 'desc' },
   });
+
   res.json({
     success: true,
     data: products.map((p) => ({ ...p, price: Number(p.price) })),
+  });
+});
+
+// GET /api/admin/products/:id
+adminProductsRouter.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  const product = await prisma.product.findUnique({
+    where: { id: req.params.id },
+  });
+
+  if (!product) {
+    return res.status(404).json({
+      success: false,
+      error: 'Produto não encontrado',
+    });
+  }
+
+  res.json({
+    success: true,
+    data: { ...product, price: Number(product.price) },
   });
 });
 
@@ -36,10 +56,18 @@ adminProductsRouter.post(
   requireRole('ADMIN', 'SUPER_ADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = productSchema.parse(req.body);
+
     const product = await prisma.product.create({
-      data: { ...data, metadata: (data.metadata as Prisma.InputJsonValue) ?? undefined },
+      data: {
+        ...data,
+        metadata: (data.metadata as Prisma.InputJsonValue) ?? undefined,
+      },
     });
-    res.status(201).json({ success: true, data: { ...product, price: Number(product.price) } });
+
+    res.status(201).json({
+      success: true,
+      data: { ...product, price: Number(product.price) },
+    });
   }
 );
 
@@ -49,11 +77,19 @@ adminProductsRouter.put(
   requireRole('ADMIN', 'SUPER_ADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = productSchema.partial().parse(req.body);
+
     const product = await prisma.product.update({
       where: { id: req.params.id },
-      data: { ...data, metadata: (data.metadata as Prisma.InputJsonValue) ?? undefined },
+      data: {
+        ...data,
+        metadata: (data.metadata as Prisma.InputJsonValue) ?? undefined,
+      },
     });
-    res.json({ success: true, data: { ...product, price: Number(product.price) } });
+
+    res.json({
+      success: true,
+      data: { ...product, price: Number(product.price) },
+    });
   }
 );
 
@@ -62,7 +98,11 @@ adminProductsRouter.delete(
   '/:id',
   requireRole('SUPER_ADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
-    await prisma.product.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.product.update({
+      where: { id: req.params.id },
+      data: { isActive: false },
+    });
+
     res.json({ success: true });
   }
 );
@@ -84,6 +124,7 @@ adminProductsRouter.get(
       where: { orderId: req.params.orderId },
       orderBy: { sortOrder: 'asc' },
     });
+
     res.json({ success: true, data: medias });
   }
 );
@@ -94,9 +135,11 @@ adminProductsRouter.post(
   requireRole('ADMIN', 'SUPER_ADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = mediaSchema.parse(req.body);
+
     const media = await prisma.deliveryMedia.create({
       data: { orderId: req.params.orderId, ...data },
     });
+
     res.status(201).json({ success: true, data: media });
   }
 );
