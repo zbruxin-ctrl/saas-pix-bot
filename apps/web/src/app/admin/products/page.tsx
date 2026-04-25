@@ -1,7 +1,15 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { getProducts, createProduct, updateProduct, deleteProduct } from '@/lib/api';
+import {
+  getProducts,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  getProductMedias,
+  updateProductMedias,
+  type ProductMedia,
+} from '@/lib/api';
 import { formatCurrency } from '@/lib/utils';
 import { toast } from '@/components/admin/Toast';
 import ConfirmModal from '@/components/admin/ConfirmModal';
@@ -18,17 +26,22 @@ interface Product {
   _count?: { payments: number; orders: number };
 }
 
-// Um item individual dentro de um produto (ex: várias contas, vários links)
 interface DeliveryItem {
-  id: string;   // chave local temporária
+  id: string;
   value: string;
 }
 
 const DELIVERY_TYPES = [
-  { value: 'TEXT',       label: 'TEXT — Mensagem de texto'          },
-  { value: 'LINK',       label: 'LINK — Link de acesso'             },
-  { value: 'FILE_MEDIA', label: 'FILE_MEDIA — Foto / Vídeo / Arquivo' },
-  { value: 'ACCOUNT',    label: 'ACCOUNT — Dados de conta (JSON)'   },
+  { value: 'TEXT',       label: 'TEXT — Mensagem de texto'             },
+  { value: 'LINK',       label: 'LINK — Link de acesso'                },
+  { value: 'FILE_MEDIA', label: 'FILE_MEDIA — Foto / Vídeo / Arquivo'  },
+  { value: 'ACCOUNT',    label: 'ACCOUNT — Dados de conta (JSON)'      },
+];
+
+const MEDIA_TYPES: { value: ProductMedia['mediaType']; label: string }[] = [
+  { value: 'IMAGE', label: '🖼 Imagem' },
+  { value: 'VIDEO', label: '🎬 Vídeo'  },
+  { value: 'FILE',  label: '📎 Arquivo' },
 ];
 
 const EMPTY_FORM = {
@@ -41,8 +54,6 @@ const EMPTY_FORM = {
   stock: '',
 };
 
-// Quando o tipo é ACCOUNT, o conteúdo é um array JSON de strings
-// Usamos deliveryItems para construir visualmente esse array
 function itemsToContent(items: DeliveryItem[]): string {
   const vals = items.map((i) => i.value.trim()).filter(Boolean);
   return JSON.stringify(vals);
@@ -60,6 +71,10 @@ function contentToItems(content: string): DeliveryItem[] {
 
 function newItem(): DeliveryItem {
   return { id: String(Date.now() + Math.random()), value: '' };
+}
+
+function newMedia(): ProductMedia {
+  return { url: '', mediaType: 'IMAGE', caption: '' };
 }
 
 function validate(form: typeof EMPTY_FORM, items: DeliveryItem[]): string | null {
@@ -87,16 +102,18 @@ function validate(form: typeof EMPTY_FORM, items: DeliveryItem[]): string | null
 }
 
 export default function ProductsPage() {
-  const [products, setProducts]         = useState<Product[]>([]);
-  const [loading, setLoading]           = useState(true);
-  const [showModal, setShowModal]       = useState(false);
-  const [editId, setEditId]             = useState<string | null>(null);
-  const [form, setForm]                 = useState(EMPTY_FORM);
-  const [items, setItems]               = useState<DeliveryItem[]>([newItem()]);
-  const [saving, setSaving]             = useState(false);
-  const [fieldError, setFieldError]     = useState('');
-  const [search, setSearch]             = useState('');
-  const [filter, setFilter]             = useState<'all' | 'active' | 'inactive'>('all');
+  const [products, setProducts]           = useState<Product[]>([]);
+  const [loading, setLoading]             = useState(true);
+  const [showModal, setShowModal]         = useState(false);
+  const [activeTab, setActiveTab]         = useState<'product' | 'medias'>('product');
+  const [editId, setEditId]               = useState<string | null>(null);
+  const [form, setForm]                   = useState(EMPTY_FORM);
+  const [items, setItems]                 = useState<DeliveryItem[]>([newItem()]);
+  const [medias, setMedias]               = useState<ProductMedia[]>([]);
+  const [saving, setSaving]               = useState(false);
+  const [fieldError, setFieldError]       = useState('');
+  const [search, setSearch]               = useState('');
+  const [filter, setFilter]               = useState<'all' | 'active' | 'inactive'>('all');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const usesItemList = ['ACCOUNT', 'LINK', 'TEXT'].includes(form.deliveryType);
@@ -125,8 +142,10 @@ export default function ProductsPage() {
   function openCreate() {
     setForm(EMPTY_FORM);
     setItems([newItem()]);
+    setMedias([]);
     setEditId(null);
     setFieldError('');
+    setActiveTab('product');
     setShowModal(true);
   }
 
@@ -144,22 +163,36 @@ export default function ProductsPage() {
     setItems(
       ['ACCOUNT', 'LINK', 'TEXT'].includes(p.deliveryType)
         ? contentToItems(p.deliveryContent || '[]')
-        : [newItem()]
+        : [newItem()],
     );
     setEditId(p.id);
     setFieldError('');
+    setActiveTab('product');
     setShowModal(true);
+    // Carrega mídias existentes (assíncrono, não bloqueia abertura do modal)
+    getProductMedias(p.id)
+      .then(setMedias)
+      .catch(() => setMedias([]));
   }
 
+  // ─── Itens de entrega ────────────────────────────────────────────────────────
   function addItem() { setItems((prev) => [...prev, newItem()]); }
   function removeItem(id: string) { setItems((prev) => prev.filter((i) => i.id !== id)); }
   function updateItemValue(id: string, value: string) {
-    setItems((prev) => prev.map((i) => i.id === id ? { ...i, value } : i));
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, value } : i)));
   }
 
+  // ─── Mídias extras ───────────────────────────────────────────────────────────
+  function addMedia() { setMedias((prev) => [...prev, newMedia()]); }
+  function removeMedia(idx: number) { setMedias((prev) => prev.filter((_, i) => i !== idx)); }
+  function updateMedia(idx: number, patch: Partial<ProductMedia>) {
+    setMedias((prev) => prev.map((m, i) => (i === idx ? { ...m, ...patch } : m)));
+  }
+
+  // ─── Salvar ──────────────────────────────────────────────────────────────────
   async function handleSave() {
     const err = validate(form, items);
-    if (err) { setFieldError(err); return; }
+    if (err) { setFieldError(err); setActiveTab('product'); return; }
 
     setSaving(true);
     setFieldError('');
@@ -169,19 +202,36 @@ export default function ProductsPage() {
         ? itemsToContent(items)
         : form.deliveryContent;
 
+      // FIFO: estoque = número de itens preenchidos
+      const fifoCount = usesItemList
+        ? items.filter((i) => i.value.trim()).length
+        : null;
+
       const payload = {
         ...form,
         deliveryContent,
         price: parseFloat(form.price),
-        stock: form.stock ? parseInt(form.stock) : null,
+        stock: usesItemList
+          ? fifoCount
+          : form.stock ? parseInt(form.stock) : null,
       };
 
+      let savedId = editId;
       if (editId) {
         await updateProduct(editId, payload);
         toast('Produto atualizado com sucesso!', 'success');
       } else {
-        await createProduct(payload);
+        const created = await createProduct(payload);
+        savedId = created?.id ?? null;
         toast('Produto criado com sucesso!', 'success');
+      }
+
+      // Salva mídias extras
+      if (savedId) {
+        const validMedias = medias.filter((m) => m.url.trim());
+        await updateProductMedias(savedId, validMedias).catch(() =>
+          toast('Produto salvo, mas erro ao salvar mídias extras.', 'error'),
+        );
       }
 
       setShowModal(false);
@@ -211,6 +261,7 @@ export default function ProductsPage() {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Produtos</h1>
@@ -221,6 +272,7 @@ export default function ProductsPage() {
         <button onClick={openCreate} className="btn-primary">+ Novo Produto</button>
       </div>
 
+      {/* Filtros */}
       <div className="flex flex-col sm:flex-row gap-3">
         <input
           className="input flex-1"
@@ -246,6 +298,7 @@ export default function ProductsPage() {
         </div>
       </div>
 
+      {/* Lista */}
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {[...Array(6)].map((_, i) => (
@@ -293,7 +346,7 @@ export default function ProductsPage() {
                   <span className="bg-gray-100 px-2 py-1 rounded">{p.deliveryType}</span>
                   {itemCount !== null && (
                     <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded">
-                      {itemCount} item{itemCount !== 1 ? 's' : ''}
+                      {itemCount} item{itemCount !== 1 ? 's' : ''} na fila
                     </span>
                   )}
                   {p.stock != null && (
@@ -321,142 +374,232 @@ export default function ProductsPage() {
         </div>
       )}
 
+      {/* Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-6">
-              {editId ? 'Editar Produto' : 'Novo Produto'}
-            </h2>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nome *</label>
-                <input className="input" value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="Ex: Plano Pro" />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Descrição *</label>
-                <textarea className="input" rows={2} value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                  placeholder="Descrição exibida no bot" />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Preço (R$) *</label>
-                  <input className="input" type="number" step="0.01" min="0.01" value={form.price}
-                    onChange={(e) => setForm({ ...form, price: e.target.value })}
-                    placeholder="29.90" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Estoque</label>
-                  <input className="input" type="number" min="0" value={form.stock}
-                    onChange={(e) => setForm({ ...form, stock: e.target.value })}
-                    placeholder="Vazio = ilimitado" />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Entrega *</label>
-                <select className="input" value={form.deliveryType}
-                  onChange={(e) => {
-                    setForm({ ...form, deliveryType: e.target.value, deliveryContent: '' });
-                    setItems([newItem()]);
-                  }}>
-                  {DELIVERY_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>{t.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Lista de itens — TEXT, LINK, ACCOUNT */}
-              {usesItemList && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-medium text-gray-700">
-                      {form.deliveryType === 'ACCOUNT' ? 'Contas / Dados JSON *' :
-                       form.deliveryType === 'LINK'    ? 'Links de acesso *' :
-                                                         'Mensagens de entrega *'}
-                    </label>
-                    <button type="button" onClick={addItem}
-                      className="text-xs text-blue-600 hover:text-blue-700 font-medium">
-                      + Adicionar item
-                    </button>
-                  </div>
-                  <div className="space-y-2">
-                    {items.map((item, idx) => (
-                      <div key={item.id} className="flex gap-2 items-start">
-                        <span className="text-xs text-gray-400 mt-2.5 w-5 text-right shrink-0">{idx + 1}.</span>
-                        <textarea
-                          className="input flex-1 font-mono text-xs"
-                          rows={form.deliveryType === 'ACCOUNT' ? 2 : 1}
-                          value={item.value}
-                          onChange={(e) => updateItemValue(item.id, e.target.value)}
-                          placeholder={
-                            form.deliveryType === 'ACCOUNT'
-                              ? '{"login": "user", "senha": "123", "url": "https://..."}'
-                              : form.deliveryType === 'LINK'
-                              ? 'https://...'
-                              : 'Conteúdo enviado ao comprador'
-                          }
-                        />
-                        {items.length > 1 && (
-                          <button type="button" onClick={() => removeItem(item.id)}
-                            className="text-red-400 hover:text-red-600 mt-2 shrink-0 text-lg leading-none">
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  {form.deliveryType === 'ACCOUNT' && (
-                    <p className="text-xs text-gray-400 mt-1">Cada item deve ser um JSON válido.</p>
-                  )}
-                  <p className="text-xs text-gray-400 mt-1">
-                    O bot entrega um item diferente para cada compra (em ordem). Quando acabar, o estoque zera.
-                  </p>
-                </div>
-              )}
-
-              {/* FILE_MEDIA — campo simples */}
-              {form.deliveryType === 'FILE_MEDIA' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    URL / file_id da mídia *
-                  </label>
-                  <input className="input" value={form.deliveryContent}
-                    onChange={(e) => setForm({ ...form, deliveryContent: e.target.value })}
-                    placeholder={filePlaceholder} />
-                  <p className="text-xs text-gray-400 mt-1">
-                    Cole uma URL pública (imagem/vídeo) ou um file_id do Telegram.
-                  </p>
-                </div>
-              )}
-
-              <div className="flex items-center gap-2">
-                <input type="checkbox" id="isActive" checked={form.isActive}
-                  onChange={(e) => setForm({ ...form, isActive: e.target.checked })}
-                  className="rounded" />
-                <label htmlFor="isActive" className="text-sm font-medium text-gray-700">
-                  Produto ativo
-                </label>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            {/* Cabeçalho com abas */}
+            <div className="px-6 pt-6 pb-0">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">
+                {editId ? 'Editar Produto' : 'Novo Produto'}
+              </h2>
+              <div className="flex gap-1 border-b border-gray-200">
+                {([
+                  { key: 'product', label: '📦 Produto' },
+                  { key: 'medias',  label: `🎬 Mídias Extras${medias.filter(m => m.url.trim()).length > 0 ? ` (${medias.filter(m => m.url.trim()).length})` : ''}` },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setActiveTab(tab.key)}
+                    className={[
+                      'px-4 py-2 text-sm font-medium rounded-t-lg transition-colors',
+                      activeTab === tab.key
+                        ? 'bg-blue-50 text-blue-700 border-b-2 border-blue-600'
+                        : 'text-gray-500 hover:text-gray-700',
+                    ].join(' ')}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
               </div>
             </div>
 
-            {fieldError && (
-              <div className="mt-4 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm flex items-start gap-2">
-                <span>⚠️</span>
-                <span>{fieldError}</span>
-              </div>
-            )}
+            <div className="p-6">
+              {/* ─── Aba Produto ─── */}
+              {activeTab === 'product' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Nome *</label>
+                    <input className="input" value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      placeholder="Ex: Plano Pro" />
+                  </div>
 
-            <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowModal(false)} className="btn-secondary flex-1">Cancelar</button>
-              <button onClick={handleSave} disabled={saving} className="btn-primary flex-1">
-                {saving ? 'Salvando...' : editId ? 'Salvar Alterações' : 'Criar Produto'}
-              </button>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Descrição *</label>
+                    <textarea className="input" rows={2} value={form.description}
+                      onChange={(e) => setForm({ ...form, description: e.target.value })}
+                      placeholder="Descrição exibida no bot" />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Preço (R$) *</label>
+                      <input className="input" type="number" step="0.01" min="0.01" value={form.price}
+                        onChange={(e) => setForm({ ...form, price: e.target.value })}
+                        placeholder="29.90" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Estoque</label>
+                      {usesItemList ? (
+                        <div className="input bg-gray-50 text-gray-400 cursor-not-allowed select-none">
+                          Auto ({items.filter((i) => i.value.trim()).length} itens)
+                        </div>
+                      ) : (
+                        <input className="input" type="number" min="0" value={form.stock}
+                          onChange={(e) => setForm({ ...form, stock: e.target.value })}
+                          placeholder="Vazio = ilimitado" />
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Entrega *</label>
+                    <select className="input" value={form.deliveryType}
+                      onChange={(e) => {
+                        setForm({ ...form, deliveryType: e.target.value, deliveryContent: '' });
+                        setItems([newItem()]);
+                      }}>
+                      {DELIVERY_TYPES.map((t) => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Lista FIFO — TEXT, LINK, ACCOUNT */}
+                  {usesItemList && (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-sm font-medium text-gray-700">
+                          {form.deliveryType === 'ACCOUNT' ? 'Contas / Dados JSON *' :
+                           form.deliveryType === 'LINK'    ? 'Links de acesso *' :
+                                                             'Mensagens de entrega *'}
+                        </label>
+                        <button type="button" onClick={addItem}
+                          className="text-xs text-blue-600 hover:text-blue-700 font-medium">
+                          + Adicionar item
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {items.map((item, idx) => (
+                          <div key={item.id} className="flex gap-2 items-start">
+                            <span className="text-xs text-gray-400 mt-2.5 w-5 text-right shrink-0">{idx + 1}.</span>
+                            <textarea
+                              className="input flex-1 font-mono text-xs"
+                              rows={form.deliveryType === 'ACCOUNT' ? 2 : 1}
+                              value={item.value}
+                              onChange={(e) => updateItemValue(item.id, e.target.value)}
+                              placeholder={
+                                form.deliveryType === 'ACCOUNT'
+                                  ? '{"login": "user", "senha": "123", "url": "https://..."}'
+                                  : form.deliveryType === 'LINK'
+                                  ? 'https://...'
+                                  : 'Conteúdo enviado ao comprador'
+                              }
+                            />
+                            {items.length > 1 && (
+                              <button type="button" onClick={() => removeItem(item.id)}
+                                className="text-red-400 hover:text-red-600 mt-2 shrink-0 text-lg leading-none">
+                                ×
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {form.deliveryType === 'ACCOUNT' && (
+                        <p className="text-xs text-gray-400 mt-1">Cada item deve ser um JSON válido.</p>
+                      )}
+                      <p className="text-xs text-gray-400 mt-1">
+                        🔢 Fila FIFO — o bot entrega o item #1 para a 1ª compra, o #2 para a 2ª, e assim por diante. O estoque é ajustado automaticamente.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* FILE_MEDIA */}
+                  {form.deliveryType === 'FILE_MEDIA' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        URL / file_id da mídia *
+                      </label>
+                      <input className="input" value={form.deliveryContent}
+                        onChange={(e) => setForm({ ...form, deliveryContent: e.target.value })}
+                        placeholder={filePlaceholder} />
+                      <p className="text-xs text-gray-400 mt-1">
+                        Cole uma URL pública (imagem/vídeo) ou um file_id do Telegram.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" id="isActive" checked={form.isActive}
+                      onChange={(e) => setForm({ ...form, isActive: e.target.checked })}
+                      className="rounded" />
+                    <label htmlFor="isActive" className="text-sm font-medium text-gray-700">
+                      Produto ativo
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* ─── Aba Mídias Extras ─── */}
+              {activeTab === 'medias' && (
+                <div className="space-y-4">
+                  <p className="text-sm text-gray-500">
+                    Mídias enviadas ao comprador logo após a entrega principal (fotos, vídeos, arquivos extras).
+                  </p>
+
+                  {medias.length === 0 ? (
+                    <div className="text-center py-8 text-gray-400">
+                      <div className="text-3xl mb-2">🎬</div>
+                      <p className="text-sm">Nenhuma mídia extra cadastrada</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {medias.map((media, idx) => (
+                        <div key={idx} className="border border-gray-200 rounded-xl p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-gray-500">Mídia {idx + 1}</span>
+                            <button type="button" onClick={() => removeMedia(idx)}
+                              className="text-red-400 hover:text-red-600 text-sm">
+                              Remover
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <select className="input col-span-1 text-sm"
+                              value={media.mediaType}
+                              onChange={(e) => updateMedia(idx, { mediaType: e.target.value as ProductMedia['mediaType'] })}>
+                              {MEDIA_TYPES.map((t) => (
+                                <option key={t.value} value={t.value}>{t.label}</option>
+                              ))}
+                            </select>
+                            <input className="input col-span-2 text-sm"
+                              placeholder="URL pública da mídia"
+                              value={media.url}
+                              onChange={(e) => updateMedia(idx, { url: e.target.value })} />
+                          </div>
+                          <input className="input text-sm"
+                            placeholder="Legenda (opcional)"
+                            value={media.caption ?? ''}
+                            onChange={(e) => updateMedia(idx, { caption: e.target.value })} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <button type="button" onClick={addMedia}
+                    className="w-full border-2 border-dashed border-gray-200 hover:border-blue-400
+                               text-gray-400 hover:text-blue-500 rounded-xl py-3 text-sm
+                               font-medium transition-colors">
+                    + Adicionar mídia
+                  </button>
+                </div>
+              )}
+
+              {/* Erro */}
+              {fieldError && (
+                <div className="mt-4 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm flex items-start gap-2">
+                  <span>⚠️</span>
+                  <span>{fieldError}</span>
+                </div>
+              )}
+
+              {/* Ações */}
+              <div className="flex gap-3 mt-6">
+                <button onClick={() => setShowModal(false)} className="btn-secondary flex-1">Cancelar</button>
+                <button onClick={handleSave} disabled={saving} className="btn-primary flex-1">
+                  {saving ? 'Salvando...' : editId ? 'Salvar Alterações' : 'Criar Produto'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
