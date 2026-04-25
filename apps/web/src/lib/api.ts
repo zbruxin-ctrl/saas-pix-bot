@@ -1,6 +1,45 @@
 // apps/web/src/lib/api.ts
 import axios from 'axios';
+export async function uploadMediaFile(
+  file: File,
+  mediaType: 'IMAGE' | 'VIDEO' | 'FILE'
+): Promise<string> {
+  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+  const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
 
+  if (!cloudName || !uploadPreset) {
+    throw new Error('Cloudinary não configurado no frontend.');
+  }
+
+  let resourceType = 'image';
+  if (mediaType === 'VIDEO') resourceType = 'video';
+  if (mediaType === 'FILE') resourceType = 'raw';
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('upload_preset', uploadPreset);
+  form.append('folder', 'saas-pix-bot/products');
+
+  const res = await fetch(
+    `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`,
+    {
+      method: 'POST',
+      body: form,
+    }
+  );
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data?.error?.message || 'Erro ao fazer upload no Cloudinary');
+  }
+
+  if (!data?.secure_url) {
+    throw new Error('Upload concluído sem URL retornada');
+  }
+
+  return data.secure_url as string;
+}
 const api = axios.create({
   baseURL: '/api/proxy',
   withCredentials: true,
@@ -140,31 +179,39 @@ export async function uploadMediaFile(
   file: File,
   mediaType: 'IMAGE' | 'VIDEO' | 'FILE'
 ): Promise<string> {
+  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+  const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
+
+  if (!cloudName || !uploadPreset) {
+    throw new Error('Cloudinary não configurado no frontend.');
+  }
+
+  let resourceType = 'image';
+  if (mediaType === 'VIDEO') resourceType = 'video';
+  if (mediaType === 'FILE') resourceType = 'raw';
+
   const form = new FormData();
   form.append('file', file);
-  form.append('mediaType', mediaType);
+  form.append('upload_preset', uploadPreset);
+  form.append('folder', 'saas-pix-bot/products');
 
-  const res = await fetch('/api/upload', {
-    method: 'POST',
-    body: form,
-  });
+  const res = await fetch(
+    `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`,
+    {
+      method: 'POST',
+      body: form,
+    }
+  );
 
-  const rawText = await res.text();
-
-  let data: any = null;
-  try {
-    data = JSON.parse(rawText);
-  } catch {
-    throw new Error(rawText || 'Resposta inválida do servidor de upload');
-  }
+  const data = await res.json();
 
   if (!res.ok) {
-    throw new Error(data?.error || 'Erro ao fazer upload do arquivo');
+    throw new Error(data?.error?.message || 'Erro ao fazer upload no Cloudinary');
   }
 
-  if (!data?.url) {
+  if (!data?.secure_url) {
     throw new Error('Upload concluído sem URL retornada');
   }
 
-  return data.url as string;
+  return data.secure_url as string;
 }
