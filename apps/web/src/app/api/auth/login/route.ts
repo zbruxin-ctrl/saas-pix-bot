@@ -19,19 +19,16 @@ export async function POST(request: NextRequest) {
 
   const response = NextResponse.json(data);
 
-  // Lê o host da requisição para setar o cookie no domínio correto.
-  // Isso garante que funciona tanto no alias (saas-pix-bot.vercel.app)
-  // quanto no deployment direto (saas-pix-xxx.vercel.app).
-  const host = request.headers.get('host') || '';
-  const domain = host.split(':')[0]; // remove porta se houver
-
+  // NÃO setar `domain` explicitamente — o Vercel gerencia isso automaticamente.
+  // Setar domain: 'saas-pix-bot.vercel.app' fazia o cookie ser rejeitado
+  // nos deployments com URL diferente (saas-pix-xxx.vercel.app).
   response.cookies.set('auth_presence', '1', {
     httpOnly: false,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60,
     path: '/',
-    domain: domain || undefined,
+    // domain: omitido intencionalmente
   });
 
   return response;
