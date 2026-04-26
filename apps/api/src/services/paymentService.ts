@@ -31,7 +31,6 @@ export class PaymentService {
       create: { telegramId, firstName, username },
     });
 
-    // Reutiliza pagamento pendente ainda válido
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -63,7 +62,6 @@ export class PaymentService {
       },
     });
 
-    // Reserva estoque (FIFO via StockItem se disponível, fallback legado)
     if (product.stock !== null || await this.productHasStockItems(productId)) {
       try {
         await stockService.reserveStock(productId, telegramUser.id, payment.id);
@@ -87,7 +85,7 @@ export class PaymentService {
       const pixExpiresAt = new Date(
         raw.includes('+') || raw.endsWith('Z') ? raw : raw + '-03:00'
       );
-      
+
       const updatedPayment = await prisma.payment.update({
         where: { id: payment.id },
         data: {
@@ -169,14 +167,14 @@ export class PaymentService {
 
     await stockService.confirmReservation(paymentId);
     await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
-    // sendPaymentConfirmation removido — deliveryService já envia a mensagem de confirmação
+  }
 
   async cancelExpiredPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
       include: { telegramUser: true },
     });
-  }
+
     if (!payment || payment.status !== PaymentStatus.PENDING) return;
 
     await prisma.payment.update({
