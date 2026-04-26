@@ -1,6 +1,7 @@
 // routes/admin/adminProducts.ts
-// FIX #2: rotas GET de produto e GET de stock-items/medias agora exigem auth (requireRole)
-// FIX #16: GET / com paginação (page + perPage) para não carregar tudo de uma vez
+// FIX B6/CRÍTICO: POST /upload registrado ANTES de /:id
+// FIX M7: GET /stock consolidado por produto
+// FIX: upload usa Cloudinary quando CLOUDINARY_URL está configurado, diskStorage como fallback
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -9,6 +10,7 @@ import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { logger } from '../../lib/logger';
 
 export const adminProductsRouter = Router();
 
@@ -28,7 +30,7 @@ const listQuerySchema = z.object({
   perPage: z.string().default('20').transform(Number),
 });
 
-// ─── Multer: upload local temporário (fallback sem cloud storage) ─────────────
+// ─── Multer: Cloudinary quando disponível, diskStorage como fallback ─────────
 const uploadDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -50,9 +52,70 @@ const upload = multer({
   },
 });
 
+// Helper: tenta fazer upload para Cloudinary se a env estiver configurada
+async function uploadToCloudinary(
+  filePath: string,
+  originalname: string,
+  mimetype: string
+): Promise<string | null> {
+  const cloudinaryUrl = process.env.CLOUDINARY_URL;
+  if (!cloudinaryUrl) return null;
+
+  try {
+    // Import dinâmico para não quebrar se cloudinary não estiver instalado
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { v2: cloudinary } = require('cloudinary');
+    // cloudinary.config() lê CLOUDINARY_URL automaticamente
+    const isVideo = /video/i.test(mimetype);
+    const result = await cloudinary.uploader.upload(filePath, {
+      resource_type: isVideo ? 'video' : 'auto',
+      public_id: `saas-pix/${Date.now()}-${path.basename(originalname, path.extname(originalname))}`,
+      overwrite: false,
+    });
+    return result.secure_url as string;
+  } catch (err) {
+    logger.warn('[Cloudinary] Falha no upload, usando URL local como fallback:', err);
+    return null;
+  }
+}
+
+// ─── CRÍTICO: /upload DEVE vir ANTES de /:id ─────────────────────────────────
+// Se /upload vier depois, o Express interpreta 'upload' como :id e nunca alcança esta rota.
+
+// POST /api/admin/products/upload
+adminProductsRouter.post(
+  '/upload',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  upload.single('file'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    if (!req.file) {
+      res.status(400).json({ success: false, error: 'Nenhum arquivo enviado' });
+      return;
+    }
+
+    let url: string;
+    const cloudinaryResult = await uploadToCloudinary(
+      req.file.path,
+      req.file.originalname,
+      req.file.mimetype
+    );
+
+    if (cloudinaryResult) {
+      // Remove arquivo local após upload bem-sucedido ao Cloudinary
+      fs.unlink(req.file.path, () => {});
+      url = cloudinaryResult;
+    } else {
+      // Fallback: serve o arquivo pelo próprio servidor (Railway)
+      const baseUrl = process.env.API_URL ?? '';
+      url = `${baseUrl}/uploads/${req.file.filename}`;
+    }
+
+    res.status(201).json({ success: true, data: { url, filename: req.file.filename } });
+  }
+);
+
 // ─── Produtos ─────────────────────────────────────────────────────────────────
 
-// FIX #2 + #16: requireRole adicionado; paginação com page/perPage
 adminProductsRouter.get(
   '/',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -82,13 +145,66 @@ adminProductsRouter.get(
   }
 );
 
-// FIX #2: requireRole adicionado
+// M7: GET /stock — visão consolidada de estoque por produto
+adminProductsRouter.get(
+  '/stock',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (_req: AuthenticatedRequest, res: Response) => {
+    const products = await prisma.product.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        name: true,
+        stock: true,
+        _count: { select: { stockItems: true } },
+      },
+    });
+
+    // Para cada produto com stockItems, conta disponíveis
+    const result = await Promise.all(
+      products.map(async (p) => {
+        if (p._count.stockItems > 0) {
+          const available = await prisma.stockItem.count({
+            where: { productId: p.id, status: 'AVAILABLE' },
+          });
+          const reserved = await prisma.stockItem.count({
+            where: { productId: p.id, status: 'RESERVED' },
+          });
+          return {
+            productId: p.id,
+            productName: p.name,
+            mode: 'FIFO' as const,
+            available,
+            reserved,
+            total: p._count.stockItems,
+            stockField: null,
+          };
+        }
+        return {
+          productId: p.id,
+          productName: p.name,
+          mode: p.stock !== null ? ('NUMERIC' as const) : ('UNLIMITED' as const),
+          available: p.stock,
+          reserved: null,
+          total: null,
+          stockField: p.stock,
+        };
+      })
+    );
+
+    res.json({ success: true, data: result });
+  }
+);
+
 adminProductsRouter.get(
   '/:id',
   requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const product = await prisma.product.findUnique({ where: { id: req.params.id } });
-    if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
+    if (!product) {
+      res.status(404).json({ success: false, error: 'Produto não encontrado' });
+      return;
+    }
     res.json({ success: true, data: { ...product, price: Number(product.price) } });
   }
 );
@@ -129,7 +245,6 @@ adminProductsRouter.delete(
 
 // ─── Mídias de configuração do produto (medias-config) ───────────────────────
 
-// FIX #2: requireRole adicionado
 adminProductsRouter.get(
   '/:id/medias-config',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -138,7 +253,10 @@ adminProductsRouter.get(
       where: { id: req.params.id },
       select: { metadata: true },
     });
-    if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
+    if (!product) {
+      res.status(404).json({ success: false, error: 'Produto não encontrado' });
+      return;
+    }
 
     const meta = product.metadata as Record<string, unknown> | null;
     const medias = Array.isArray(meta?.medias) ? meta!.medias : [];
@@ -166,7 +284,10 @@ adminProductsRouter.put(
       where: { id: req.params.id },
       select: { metadata: true },
     });
-    if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
+    if (!product) {
+      res.status(404).json({ success: false, error: 'Produto não encontrado' });
+      return;
+    }
 
     const existingMeta = (product.metadata as Record<string, unknown>) ?? {};
     const updatedMeta: Prisma.InputJsonValue = { ...existingMeta, medias };
@@ -180,31 +301,11 @@ adminProductsRouter.put(
   }
 );
 
-// ─── Upload de mídia ──────────────────────────────────────────────────────────
-
-adminProductsRouter.post(
-  '/upload',
-  requireRole('ADMIN', 'SUPERADMIN'),
-  upload.single('file'),
-  async (req: AuthenticatedRequest, res: Response) => {
-    if (!req.file) {
-      res.status(400).json({ success: false, error: 'Nenhum arquivo enviado' });
-      return;
-    }
-
-    const baseUrl = process.env.API_URL ?? '';
-    const url = `${baseUrl}/uploads/${req.file.filename}`;
-
-    res.status(201).json({ success: true, data: { url, filename: req.file.filename } });
-  }
-);
-
 // ─── StockItem CRUD ───────────────────────────────────────────────────────────
 const stockItemSchema = z.object({
   content: z.string().min(1),
 });
 
-// FIX #2: requireRole adicionado
 adminProductsRouter.get(
   '/:productId/stock-items',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -246,7 +347,6 @@ const mediaSchema = z.object({
   sortOrder: z.number().int().default(0),
 });
 
-// FIX #2: requireRole adicionado
 adminProductsRouter.get(
   '/orders/:orderId/medias',
   requireRole('ADMIN', 'SUPERADMIN'),

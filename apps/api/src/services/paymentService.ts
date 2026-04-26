@@ -1,6 +1,6 @@
-// paymentService.ts — cria pagamentos PIX com reserva FIFO via StockItem
-// FIX #5: processApprovedPayment usa updateMany com WHERE status=PENDING dentro da transaction
-//         para garantir que apenas um dos webhooks duplicados do MP processe o pagamento
+// paymentService.ts
+// FIX M10: findExpiredPaymentIds() extrai a query do job para cá
+// FIX B4: usa pixExpiresAt < cutoff (não createdAt) para encontrar PIX vencidos
 import { PaymentStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -78,7 +78,6 @@ export class PaymentService {
 
       const raw = (mpPayment as { date_of_expiration?: string }).date_of_expiration;
       let pixExpiresAt = raw ? new Date(raw) : new Date(Date.now() + 30 * 60 * 1000);
-
       if (Number.isNaN(pixExpiresAt.getTime())) {
         pixExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
       }
@@ -116,6 +115,19 @@ export class PaymentService {
     return count > 0;
   }
 
+  // FIX M10: lógica de busca de pagamentos expirados centralizada aqui
+  // FIX B4: usa pixExpiresAt < cutoff — campo correto do prazo do PIX
+  async findExpiredPaymentIds(cutoff: Date): Promise<string[]> {
+    const payments = await prisma.payment.findMany({
+      where: {
+        status: PaymentStatus.PENDING,
+        pixExpiresAt: { lt: cutoff },
+      },
+      select: { id: true },
+    });
+    return payments.map((p) => p.id);
+  }
+
   async processApprovedPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
@@ -144,19 +156,13 @@ export class PaymentService {
       return;
     }
 
-    // FIX #5: usa updateMany com WHERE status=PENDING como guarda atômica.
-    // Se dois webhooks chegarem simultaneamente, apenas o primeiro vai atualizar
-    // (count === 1) e o segundo vai encontrar count === 0 e sair sem criar Order duplicada.
     const order = await prisma.$transaction(async (tx) => {
       const updated = await tx.payment.updateMany({
         where: { id: paymentId, status: PaymentStatus.PENDING },
         data: { status: PaymentStatus.APPROVED, approvedAt: new Date() },
       });
 
-      if (updated.count === 0) {
-        // Outro processo já atualizou este pagamento — sai sem criar Order
-        return null;
-      }
+      if (updated.count === 0) return null;
 
       const newOrder = await tx.order.create({
         data: {
@@ -185,7 +191,12 @@ export class PaymentService {
       include: { telegramUser: true },
     });
 
+    // FIX L2: verifica que pixExpiresAt realmente passou antes de expirar
     if (!payment || payment.status !== PaymentStatus.PENDING) return;
+    if (payment.pixExpiresAt && payment.pixExpiresAt > new Date()) {
+      logger.warn(`[ExpireJob] Pagamento ${paymentId} com pixExpiresAt no futuro — ignorando`);
+      return;
+    }
 
     await prisma.payment.update({
       where: { id: paymentId },
@@ -198,7 +209,7 @@ export class PaymentService {
     try {
       await telegramService.sendMessage(
         payment.telegramUser.telegramId,
-        `⏰ *Pagamento expirado*\n\nSeu PIX não foi confirmado em 30 minutos e foi cancelado automaticamente.\n\nFique à vontade para tentar novamente! 😊`
+        `⏰ *Pagamento expirado*\n\nSeu PIX não foi confirmado e foi cancelado automaticamente.\n\nFique à vontade para tentar novamente! 😊`
       );
     } catch {
       logger.warn(`Não foi possível notificar usuário ${payment.telegramUser.telegramId} sobre expiração`);

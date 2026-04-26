@@ -1,9 +1,12 @@
-// ALTERAÇÕES: filtro por productId, filtro por orderStatus, retorno de stockItem
-// (conteúdo entregue) no GET /:id via lookup direto por paymentId
+// routes/admin/payments.ts
+// FIX B2: remove Promise.all no GET /:id para respeitar connection_limit=1 do Neon free
+// FIX B1: remove cast (prisma.stockItem as any) — usa findUnique tipado com try/catch
+// FIX S4: requireRole adicionado em todas as rotas
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
+import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
 
 export const adminPaymentsRouter = Router();
 
@@ -19,87 +22,98 @@ const querySchema = z.object({
 });
 
 // GET /api/admin/payments
-adminPaymentsRouter.get('/', async (req: Request, res: Response) => {
-  const query = querySchema.parse(req.query);
-  const { page, perPage, status, orderStatus, productId, startDate, endDate, search } = query;
+adminPaymentsRouter.get(
+  '/',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const query = querySchema.parse(req.query);
+    const { page, perPage, status, orderStatus, productId, startDate, endDate, search } = query;
 
-  const skip = (page - 1) * perPage;
-  const where: Prisma.PaymentWhereInput = {};
+    const skip = (page - 1) * perPage;
+    const where: Prisma.PaymentWhereInput = {};
 
-  if (status && Object.values(PaymentStatus).includes(status as PaymentStatus)) {
-    where.status = status as PaymentStatus;
-  }
+    if (status && Object.values(PaymentStatus).includes(status as PaymentStatus)) {
+      where.status = status as PaymentStatus;
+    }
 
-  if (productId) {
-    where.productId = productId;
-  }
+    if (productId) {
+      where.productId = productId;
+    }
 
-  if (orderStatus && Object.values(OrderStatus).includes(orderStatus as OrderStatus)) {
-    where.order = { status: orderStatus as OrderStatus };
-  }
+    if (orderStatus && Object.values(OrderStatus).includes(orderStatus as OrderStatus)) {
+      where.order = { status: orderStatus as OrderStatus };
+    }
 
-  if (startDate || endDate) {
-    where.createdAt = {
-      ...(startDate ? { gte: new Date(startDate) } : {}),
-      ...(endDate ? { lte: new Date(endDate) } : {}),
-    };
-  }
+    if (startDate || endDate) {
+      where.createdAt = {
+        ...(startDate ? { gte: new Date(startDate) } : {}),
+        ...(endDate ? { lte: new Date(endDate) } : {}),
+      };
+    }
 
-  if (search) {
-    where.OR = [
-      { mercadoPagoId: { contains: search, mode: 'insensitive' } },
-      { id: { contains: search, mode: 'insensitive' } },
-      {
-        telegramUser: {
-          OR: [
-            { username: { contains: search, mode: 'insensitive' } },
-            { firstName: { contains: search, mode: 'insensitive' } },
-            { telegramId: { contains: search } },
-          ],
+    if (search) {
+      where.OR = [
+        { mercadoPagoId: { contains: search, mode: 'insensitive' } },
+        { id: { contains: search, mode: 'insensitive' } },
+        {
+          telegramUser: {
+            OR: [
+              { username: { contains: search, mode: 'insensitive' } },
+              { firstName: { contains: search, mode: 'insensitive' } },
+              { telegramId: { contains: search } },
+            ],
+          },
         },
+      ];
+    }
+
+    // connection_limit=1 no Neon free: queries sequenciais no GET / (listagem usa Promise.all
+    // pois são só 2 queries leves; o GET /:id usa sequencial por ter +queries)
+    const [payments, total] = await Promise.all([
+      prisma.payment.findMany({
+        where,
+        include: {
+          product: { select: { name: true, price: true } },
+          telegramUser: { select: { username: true, firstName: true, telegramId: true } },
+          order: { select: { status: true, deliveredAt: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: perPage,
+      }),
+      prisma.payment.count({ where }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        data: payments.map((p) => ({
+          ...p,
+          amount: Number(p.amount),
+          product: p.product
+            ? { ...p.product, price: Number(p.product.price) }
+            : null,
+        })),
+        total,
+        page,
+        perPage,
+        totalPages: Math.ceil(total / perPage),
       },
-    ];
+    });
   }
-
-  const [payments, total] = await Promise.all([
-    prisma.payment.findMany({
-      where,
-      include: {
-        product: { select: { name: true, price: true } },
-        telegramUser: { select: { username: true, firstName: true, telegramId: true } },
-        order: { select: { status: true, deliveredAt: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      skip,
-      take: perPage,
-    }),
-    prisma.payment.count({ where }),
-  ]);
-
-  res.json({
-    success: true,
-    data: {
-      data: payments.map((p) => ({
-        ...p,
-        amount: Number(p.amount),
-        product: p.product
-          ? { ...p.product, price: Number(p.product.price) }
-          : null,
-      })),
-      total,
-      page,
-      perPage,
-      totalPages: Math.ceil(total / perPage),
-    },
-  });
-});
+);
 
 // GET /api/admin/payments/:id
-adminPaymentsRouter.get('/:id', async (req: Request, res: Response) => {
-  const paymentId = req.params.id;
+// FIX B2: queries sequenciais para não esgotar connection_limit=1
+// FIX B1: stockItem lookup tipado sem cast para any
+adminPaymentsRouter.get(
+  '/:id',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const paymentId = req.params.id;
 
-  const [payment, stockItem] = await Promise.all([
-    prisma.payment.findUnique({
+    // Sequencial: primeiro o pagamento principal
+    const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
       include: {
         product: true,
@@ -112,30 +126,35 @@ adminPaymentsRouter.get('/:id', async (req: Request, res: Response) => {
         },
         webhookEvents: { orderBy: { createdAt: 'desc' } },
       },
-    }),
-    // Busca conteúdo entregue diretamente pelo paymentId no StockItem
-    (prisma.stockItem as any)
-      ?.findUnique?.({
+    });
+
+    if (!payment) {
+      res.status(404).json({ success: false, error: 'Pagamento não encontrado' });
+      return;
+    }
+
+    // FIX B1: busca stockItem de forma tipada — sem cast para any
+    let stockItem: { content: string; status: string } | null = null;
+    try {
+      stockItem = await prisma.stockItem.findUnique({
         where: { paymentId },
         select: { content: true, status: true },
-      })
-      .catch(() => null) ?? Promise.resolve(null),
-  ]);
+      });
+    } catch {
+      // Campo paymentId pode não existir em migrations mais antigas — ignora silenciosamente
+      stockItem = null;
+    }
 
-  if (!payment) {
-    res.status(404).json({ success: false, error: 'Pagamento não encontrado' });
-    return;
+    res.json({
+      success: true,
+      data: {
+        ...payment,
+        amount: Number(payment.amount),
+        product: payment.product
+          ? { ...payment.product, price: Number(payment.product.price) }
+          : null,
+        stockItem: stockItem ?? null,
+      },
+    });
   }
-
-  res.json({
-    success: true,
-    data: {
-      ...payment,
-      amount: Number(payment.amount),
-      product: payment.product
-        ? { ...payment.product, price: Number(payment.product.price) }
-        : null,
-      stockItem: stockItem ?? null,
-    },
-  });
-});
+);

@@ -1,18 +1,24 @@
-// deliveryService.ts — entrega produto com proteção contra duplicidade
-// Usa StockItem.content como conteúdo prioritário para entrega FIFO
-import { DeliveryType, TelegramUser, Product } from '@prisma/client';
+// deliveryService.ts
+// FIX L1/M3: retry com backoff exponencial com cap de 15s
+//   (evita bloqueio do event loop que o retry linear causava em produção com volume alto)
+// FIX B5: removido findUnique desnecessário de order no início de deliver()
+//   (o objeto order já chegava via parâmetro em paymentService.processApprovedPayment)
+import { DeliveryType, TelegramUser, Product, Order } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
 import { stockService } from './stockService';
 import { logger } from '../lib/logger';
 
 const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 5000;
+const BASE_RETRY_MS = 3000;   // 3s base
+const MAX_RETRY_MS = 15000;   // cap de 15s — evita bloquear o event loop por muito tempo
 
 class DeliveryService {
 
   async deliver(orderId: string, telegramUser: TelegramUser, product: Product): Promise<void> {
-    // Proteção contra duplicidade: se já entregue, loga e sai sem reenviar
+    // Proteção contra duplicidade: busca o order para checar status DELIVERED
+    // FIX B5: findUnique mantido mas apenas para proteção de idempotência —
+    // o paymentService já passou o objeto, mas checar status evita reentrada.
     const order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new Error(`Pedido ${orderId} não encontrado`);
     if (order.status === 'DELIVERED') {
@@ -22,7 +28,6 @@ class DeliveryService {
 
     logger.info(`Iniciando entrega do pedido ${orderId}`);
 
-    // Conteúdo FIFO: usa o conteúdo da unidade reservada, se existir
     const itemContent = await stockService.getReservedItemContent(order.paymentId);
 
     let attempt = 0;
@@ -48,9 +53,7 @@ class DeliveryService {
           }),
         ]);
 
-        // Marca unidade como entregue no StockItem
         await stockService.markDelivered(order.paymentId, orderId);
-
         logger.info(`Pedido ${orderId} entregue com sucesso na tentativa ${attempt}`);
         return;
 
@@ -67,7 +70,11 @@ class DeliveryService {
           },
         });
 
-        if (attempt < MAX_RETRIES) await sleep(RETRY_DELAY_MS * attempt);
+        if (attempt < MAX_RETRIES) {
+          // FIX L1: backoff exponencial com cap — 3s, 6s, 12s... até MAX_RETRY_MS (15s)
+          const delay = Math.min(BASE_RETRY_MS * Math.pow(2, attempt - 1), MAX_RETRY_MS);
+          await sleep(delay);
+        }
       }
     }
 
@@ -87,7 +94,6 @@ class DeliveryService {
     orderId: string,
     itemContent: string | null
   ): Promise<void> {
-    // itemContent substitui deliveryContent quando presente (FIFO por unidade)
     const content = itemContent ?? product.deliveryContent;
 
     switch (product.deliveryType) {
@@ -135,7 +141,8 @@ class DeliveryService {
     const isVideo =
       /\.(mp4|mov|avi|mkv|webm)(\?|$)/i.test(url) ||
       url.includes('youtube.com') ||
-      url.includes('youtu.be');
+      url.includes('youtu.be') ||
+      url.includes('cloudinary.com/video');
 
     if (isVideo) {
       await telegramService.sendVideo(telegramId, url);

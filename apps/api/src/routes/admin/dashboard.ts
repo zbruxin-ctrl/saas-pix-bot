@@ -1,5 +1,7 @@
-// Dashboard admin — queries sequenciais para não esgotar o connection pool
-// (planos gratuitos têm connection_limit=1; Promise.all com 15 queries paralelas causa timeout)
+// routes/admin/dashboard.ts
+// FIX L3: recentPayments mostra os últimos 10 dos últimos 7 dias (não de todos os tempos)
+// FIX M4: counts de status agrupados num único groupBy ao invés de 6 queries separadas
+// Queries sequenciais mantidas para respeitar connection_limit=1 do Neon free tier
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { AuthenticatedRequest } from '../../middleware/auth';
@@ -10,48 +12,55 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOf7DaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  // --- queries sequenciais para respeitar connection_limit=1 ---
-  const totalApproved       = await prisma.payment.count({ where: { status: 'APPROVED' } });
-  const totalPending        = await prisma.payment.count({ where: { status: 'PENDING' } });
-  const totalRejected       = await prisma.payment.count({ where: { status: { in: ['REJECTED'] } } });
-  const totalExpired        = await prisma.payment.count({ where: { status: 'EXPIRED' } });
-  const totalCancelled      = await prisma.payment.count({ where: { status: 'CANCELLED' } });
-  const totalRefunded       = await prisma.payment.count({ where: { status: 'REFUNDED' } });
+  // M4: um único groupBy substitui 6 queries de count separadas por status
+  const statusCounts = await prisma.payment.groupBy({
+    by: ['status'],
+    _count: { status: true },
+  });
 
-  const revenueResult       = await prisma.payment.aggregate({
+  const countByStatus = (status: string) =>
+    statusCounts.find((s) => s.status === status)?._count?.status ?? 0;
+
+  // Receita total (somente APPROVED)
+  const revenueResult = await prisma.payment.aggregate({
     where: { status: 'APPROVED' },
     _sum: { amount: true },
   });
 
-  const todayPayments       = await prisma.payment.count({
+  // Hoje
+  const todayPayments = await prisma.payment.count({
     where: { status: 'APPROVED', approvedAt: { gte: startOfToday } },
   });
-  const todayRevenue        = await prisma.payment.aggregate({
+  const todayRevenue = await prisma.payment.aggregate({
     where: { status: 'APPROVED', approvedAt: { gte: startOfToday } },
     _sum: { amount: true },
   });
 
-  const monthPayments       = await prisma.payment.count({
+  // Este mês
+  const monthPayments = await prisma.payment.count({
     where: { status: 'APPROVED', approvedAt: { gte: startOfMonth } },
   });
-  const monthRevenue        = await prisma.payment.aggregate({
+  const monthRevenue = await prisma.payment.aggregate({
     where: { status: 'APPROVED', approvedAt: { gte: startOfMonth } },
     _sum: { amount: true },
   });
 
+  // Falhas operacionais
   const deliveriesFailedToday = await prisma.deliveryLog.count({
     where: { status: 'FAILED', createdAt: { gte: startOfToday } },
   });
-  const webhooksFailedToday   = await prisma.webhookEvent.count({
+  const webhooksFailedToday = await prisma.webhookEvent.count({
     where: { status: 'FAILED', createdAt: { gte: startOfToday } },
   });
-  const ordersWithFailure     = await prisma.order.count({ where: { status: 'FAILED' } });
+  const ordersWithFailure = await prisma.order.count({ where: { status: 'FAILED' } });
 
-  const recentPayments        = await prisma.payment.findMany({
-    where: { status: 'APPROVED' },
+  // FIX L3: últimos 10 pagamentos aprovados nos últimos 7 dias
+  const recentPayments = await prisma.payment.findMany({
+    where: { status: 'APPROVED', approvedAt: { gte: startOf7DaysAgo } },
     include: {
-      product:      { select: { name: true } },
+      product: { select: { name: true } },
       telegramUser: { select: { username: true, firstName: true } },
     },
     orderBy: { approvedAt: 'desc' },
@@ -63,12 +72,12 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
     data: {
       stats: {
         totalRevenue:         Number(revenueResult._sum.amount || 0),
-        totalApproved,
-        totalPending,
-        totalRejected,
-        totalExpired,
-        totalCancelled,
-        totalRefunded,
+        totalApproved:        countByStatus('APPROVED'),
+        totalPending:         countByStatus('PENDING'),
+        totalRejected:        countByStatus('REJECTED'),
+        totalExpired:         countByStatus('EXPIRED'),
+        totalCancelled:       countByStatus('CANCELLED'),
+        totalRefunded:        countByStatus('REFUNDED'),
         revenueToday:         Number(todayRevenue._sum.amount || 0),
         paymentsToday:        todayPayments,
         revenueThisMonth:     Number(monthRevenue._sum.amount || 0),

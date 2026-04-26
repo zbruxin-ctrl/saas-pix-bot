@@ -22,15 +22,27 @@ app.set('trust proxy', 1);
 
 app.use(helmet({ contentSecurityPolicy: false }));
 
-const fixedOrigins = env.NODE_ENV === 'development'
-  ? ['http://localhost:3000', 'http://localhost:3001', env.ADMIN_URL]
-  : [env.ADMIN_URL, env.BOT_WEBHOOK_URL].filter(Boolean) as string[];
+// FIX S1: CORS via allowlist explícita.
+// Não mais aceita qualquer *.vercel.app — apenas ADMIN_URL + origens extras declaradas em ALLOWED_ORIGINS.
+// Para adicionar outro domínio (ex: Vercel preview específico), configure ALLOWED_ORIGINS no Railway:
+//   ALLOWED_ORIGINS=https://meu-painel.vercel.app,https://preview-xyz.vercel.app
+const extraOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const allowedOrigins = [
+  env.ADMIN_URL,
+  ...(env.BOT_WEBHOOK_URL ? [env.BOT_WEBHOOK_URL] : []),
+  ...(env.NODE_ENV === 'development'
+    ? ['http://localhost:3000', 'http://localhost:3001']
+    : []),
+  ...extraOrigins,
+].filter(Boolean) as string[];
 
 function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return true;
-  if (fixedOrigins.includes(origin)) return true;
-  if (origin.endsWith('.vercel.app')) return true;
-  return false;
+  if (!origin) return true; // requests sem Origin (ex: curl, Railway health checks)
+  return allowedOrigins.includes(origin);
 }
 
 app.use(cors({
@@ -51,14 +63,19 @@ app.use('/api/webhooks', express.raw({ type: 'application/json', limit: '1mb' })
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Serve uploads locais (fallback quando Cloudinary não está configurado)
+// Em produção com Cloudinary isso não é chamado pois as URLs já são do Cloudinary
+app.use('/uploads', express.static('uploads'));
+
 // --- Rota de setup inicial ---
-// Uso: GET /setup-admin?secret=SETUP_SECRET&email=admin@x.com&password=Senha123
-// Remova SETUP_SECRET do Railway depois de usar
-app.get('/setup-admin', async (req, res) => {
+// FIX S3: aceita apenas POST (não GET) para evitar navegação acidental no browser.
+// Uso: POST /setup-admin com body { secret, email, password }
+// Remova SETUP_SECRET do Railway após usar.
+app.post('/setup-admin', async (req, res) => {
   const setupSecret = process.env.SETUP_SECRET;
   if (!setupSecret) { res.status(404).json({ error: 'Rota nao disponivel' }); return; }
 
-  const { secret, email, password } = req.query as Record<string, string>;
+  const { secret, email, password } = req.body as Record<string, string>;
   if (secret !== setupSecret) { res.status(403).json({ error: 'Secret invalido' }); return; }
   if (!email || !password || password.length < 8) {
     res.status(400).json({ error: 'Informe email e password (minimo 8 caracteres)' });

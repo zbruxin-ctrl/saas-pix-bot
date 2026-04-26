@@ -3,13 +3,12 @@ import path from 'path';
 
 // Em produção as variáveis já vêm injetadas pela plataforma (Railway/Render/Coolify)
 // Em desenvolvimento carrega o .env da raiz do monorepo
-// Tenta múltiplos caminhos para cobrir tanto `ts-node src/` quanto `node dist/`
 if (process.env.NODE_ENV !== 'production') {
   const candidates = [
-    path.resolve(process.cwd(), '.env'),                     // raiz onde o processo foi iniciado
-    path.resolve(__dirname, '../../../../.env'),             // relativo ao src/config (ts-node)
-    path.resolve(__dirname, '../../../../../.env'),          // relativo ao dist/config (node)
-    path.resolve(__dirname, '../../.env'),                   // dentro de apps/api
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(__dirname, '../../../../.env'),
+    path.resolve(__dirname, '../../../../../.env'),
+    path.resolve(__dirname, '../../.env'),
   ];
 
   for (const p of candidates) {
@@ -42,6 +41,15 @@ const envSchema = z.object({
   API_URL: z.string().url().default('http://localhost:3001'),
   ADMIN_URL: z.string().url().default('http://localhost:3000'),
   BOT_WEBHOOK_URL: z.string().url().optional(),
+
+  // CORS extra: domínios adicionais separados por vírgula (ex: previews do Vercel específicos)
+  // Exemplo Railway: ALLOWED_ORIGINS=https://meu-painel.vercel.app,https://preview-abc.vercel.app
+  ALLOWED_ORIGINS: z.string().optional(),
+
+  // Cloudinary: configure CLOUDINARY_URL no Railway para usar Cloudinary.
+  // Formato: cloudinary://api_key:api_secret@cloud_name
+  // Se não configurado, arquivos são servidos localmente pelo Railway (sem persistência entre deploys).
+  CLOUDINARY_URL: z.string().optional(),
 
   REDIS_URL: z.string().optional(),
 });

@@ -1,4 +1,5 @@
 // webhooks.ts — webhook Mercado Pago com assinatura, idempotência e processamento assíncrono
+// FIX L5: upsert não sobrescreve status IGNORED/FAILED de eventos já processados anteriormente
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
@@ -14,7 +15,6 @@ export const webhooksRouter = Router();
 const HANDLED_EVENTS = ['payment'];
 const APPROVED_STATUS = 'approved';
 
-// POST /api/webhooks/mercadopago
 webhooksRouter.post(
   '/mercadopago',
   webhookRateLimit,
@@ -33,7 +33,6 @@ webhooksRouter.post(
 
     const isValid = validateWebhookSignature(req, bodyString);
     if (!isValid) {
-      // Retorna 200 para não vazar informação de assinatura ao MP
       logger.warn('Webhook: assinatura inválida', { ip: req.ip });
       res.status(200).json({ status: 'ignored' });
       return;
@@ -45,7 +44,6 @@ webhooksRouter.post(
 
     logger.info(`Webhook recebido: tipo=${eventType} | action=${action} | id=${dataId}`);
 
-    // Responde 200 imediatamente — processamento é assíncrono
     res.status(200).json({ status: 'received' });
 
     processWebhookAsync(eventType, dataId, payload).catch((error) => {
@@ -69,7 +67,9 @@ async function processWebhookAsync(
     return;
   }
 
-  // Idempotência: checa se já foi PROCESSED antes do upsert
+  // FIX L5: checa status ANTES do upsert.
+  // IGNORED e FAILED NÃO devem ser sobrescritos para PROCESSING automaticamente.
+  // PROCESSED também não — idempotência.
   const existingEvent = await prisma.webhookEvent.findUnique({
     where: {
       provider_externalId_eventType: {
@@ -85,7 +85,12 @@ async function processWebhookAsync(
     return;
   }
 
-  // Evita processamento concorrente: só avança se conseguir upsert para PROCESSING
+  // FIX L5: não reprocessa eventos que foram explicitamente IGNORED
+  if (existingEvent?.status === 'IGNORED') {
+    logger.info(`Webhook marcado como IGNORED anteriormente: ${externalId}. Pulando.`);
+    return;
+  }
+
   const webhookEvent = await prisma.webhookEvent.upsert({
     where: {
       provider_externalId_eventType: {
@@ -116,7 +121,6 @@ async function processWebhookAsync(
       return;
     }
 
-    // Busca pagamento interno pelo mercadoPagoId ou external_reference
     const internalPayment =
       await prisma.payment.findUnique({ where: { mercadoPagoId: externalId } }) ||
       await prisma.payment.findUnique({ where: { id: mpPayment.external_reference } });
@@ -156,13 +160,11 @@ async function processWebhookAsync(
 
 function validateWebhookSignature(req: Request, body: string): boolean {
   try {
-    // Em desenvolvimento aceita sem assinatura para facilitar testes locais
     if (env.NODE_ENV === 'development') return true;
 
     const xSignature = req.headers['x-signature'] as string | undefined;
     const xRequestId = req.headers['x-request-id'] as string | undefined;
 
-    // Sem cabeçalhos de assinatura = rejeita em produção
     if (!xSignature || !xRequestId) return false;
 
     const parts = xSignature.split(',');
@@ -173,7 +175,6 @@ function validateWebhookSignature(req: Request, body: string): boolean {
     const ts = tsPart.split('=')[1];
     const signature = v1Part.split('=')[1];
 
-    // ID pode vir no query param ou no body
     let dataId = (req.query['data.id'] as string) || (req.query['id'] as string) || '';
     if (!dataId) {
       try { dataId = (JSON.parse(body)?.data?.id as string) || ''; } catch { /* ignore */ }
@@ -186,7 +187,6 @@ function validateWebhookSignature(req: Request, body: string): boolean {
       .update(manifest)
       .digest('hex');
 
-    // Comprimentos diferentes causam exceção em timingSafeEqual — protege antes de comparar
     const expectedBuf = Buffer.from(expectedSignature, 'hex');
     const receivedBuf = Buffer.from(signature, 'hex');
     if (expectedBuf.length !== receivedBuf.length) return false;
