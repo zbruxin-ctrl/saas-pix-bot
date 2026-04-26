@@ -1,4 +1,6 @@
 // routes/admin/adminProducts.ts
+// FIX #2: rotas GET de produto e GET de stock-items/medias agora exigem auth (requireRole)
+// FIX #16: GET / com paginação (page + perPage) para não carregar tudo de uma vez
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -19,6 +21,11 @@ const productSchema = z.object({
   isActive: z.boolean().default(true),
   stock: z.number().int().positive().nullable().optional(),
   metadata: z.record(z.unknown()).nullable().optional(),
+});
+
+const listQuerySchema = z.object({
+  page: z.string().default('1').transform(Number),
+  perPage: z.string().default('20').transform(Number),
 });
 
 // ─── Multer: upload local temporário (fallback sem cloud storage) ─────────────
@@ -45,16 +52,46 @@ const upload = multer({
 
 // ─── Produtos ─────────────────────────────────────────────────────────────────
 
-adminProductsRouter.get('/', async (_req, res: Response) => {
-  const products = await prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
-  res.json({ success: true, data: products.map((p) => ({ ...p, price: Number(p.price) })) });
-});
+// FIX #2 + #16: requireRole adicionado; paginação com page/perPage
+adminProductsRouter.get(
+  '/',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { page, perPage } = listQuerySchema.parse(req.query);
+    const skip = (page - 1) * perPage;
 
-adminProductsRouter.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
-  const product = await prisma.product.findUnique({ where: { id: req.params.id } });
-  if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
-  res.json({ success: true, data: { ...product, price: Number(product.price) } });
-});
+    const [products, total] = await Promise.all([
+      prisma.product.findMany({
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: perPage,
+      }),
+      prisma.product.count(),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        data: products.map((p) => ({ ...p, price: Number(p.price) })),
+        total,
+        page,
+        perPage,
+        totalPages: Math.ceil(total / perPage),
+      },
+    });
+  }
+);
+
+// FIX #2: requireRole adicionado
+adminProductsRouter.get(
+  '/:id',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+    if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
+    res.json({ success: true, data: { ...product, price: Number(product.price) } });
+  }
+);
 
 adminProductsRouter.post(
   '/',
@@ -91,10 +128,11 @@ adminProductsRouter.delete(
 );
 
 // ─── Mídias de configuração do produto (medias-config) ───────────────────────
-// Armazenadas em product.metadata.medias — sem tabela própria por ora.
-// GET /api/admin/products/:id/medias-config
+
+// FIX #2: requireRole adicionado
 adminProductsRouter.get(
   '/:id/medias-config',
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
@@ -108,7 +146,6 @@ adminProductsRouter.get(
   }
 );
 
-// PUT /api/admin/products/:id/medias-config
 const mediasConfigSchema = z.object({
   medias: z.array(
     z.object({
@@ -143,9 +180,8 @@ adminProductsRouter.put(
   }
 );
 
-// ─── Upload de mídia (armazenamento local temporário) ─────────────────────────
-// POST /api/admin/upload
-// Nota: em produção substitua pelo upload direto para S3/R2/Supabase Storage.
+// ─── Upload de mídia ──────────────────────────────────────────────────────────
+
 adminProductsRouter.post(
   '/upload',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -156,7 +192,6 @@ adminProductsRouter.post(
       return;
     }
 
-    // Gera URL pública usando a API_URL configurada no ambiente
     const baseUrl = process.env.API_URL ?? '';
     const url = `${baseUrl}/uploads/${req.file.filename}`;
 
@@ -169,9 +204,10 @@ const stockItemSchema = z.object({
   content: z.string().min(1),
 });
 
-// GET /api/admin/products/:productId/stock-items
+// FIX #2: requireRole adicionado
 adminProductsRouter.get(
   '/:productId/stock-items',
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const items = await prisma.stockItem.findMany({
       where: { productId: req.params.productId },
@@ -181,7 +217,6 @@ adminProductsRouter.get(
   }
 );
 
-// POST /api/admin/products/:productId/stock-items
 adminProductsRouter.post(
   '/:productId/stock-items',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -194,8 +229,6 @@ adminProductsRouter.post(
   }
 );
 
-// DELETE /api/admin/products/stock-items/:itemId
-// FIX: movido para DEPOIS das rotas /:productId/* para evitar conflito de params no Express
 adminProductsRouter.delete(
   '/stock-items/:itemId',
   requireRole('SUPERADMIN'),
@@ -213,13 +246,18 @@ const mediaSchema = z.object({
   sortOrder: z.number().int().default(0),
 });
 
-adminProductsRouter.get('/orders/:orderId/medias', async (req: AuthenticatedRequest, res: Response) => {
-  const medias = await prisma.deliveryMedia.findMany({
-    where: { orderId: req.params.orderId },
-    orderBy: { sortOrder: 'asc' },
-  });
-  res.json({ success: true, data: medias });
-});
+// FIX #2: requireRole adicionado
+adminProductsRouter.get(
+  '/orders/:orderId/medias',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const medias = await prisma.deliveryMedia.findMany({
+      where: { orderId: req.params.orderId },
+      orderBy: { sortOrder: 'asc' },
+    });
+    res.json({ success: true, data: medias });
+  }
+);
 
 adminProductsRouter.post(
   '/orders/:orderId/medias',
