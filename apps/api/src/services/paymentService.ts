@@ -1,4 +1,7 @@
 // paymentService.ts — cria pagamentos PIX com reserva FIFO via StockItem
+// FIX #1: removido getAvailableStock() antes da criação do payment
+//         (race condition — o check atômico já ocorre dentro de reserveStock)
+// FIX #6: removido campo payerEmail do DTO — mercadoPagoService gera internamente
 import { PaymentStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -19,10 +22,9 @@ export class PaymentService {
     });
     if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
 
-    const available = await stockService.getAvailableStock(productId);
-    if (available !== null && available <= 0) {
-      throw new AppError('Produto esgotado no momento. Tente novamente em alguns minutos.', 409);
-    }
+    // FIX #1: Não fazemos mais getAvailableStock() aqui.
+    // O check de disponibilidade ocorre atomicamente dentro de reserveStock(),
+    // eliminando a race condition entre o check e a reserva.
 
     const telegramUser = await prisma.telegramUser.upsert({
       where: { telegramId },
@@ -74,7 +76,7 @@ export class PaymentService {
       const mpPayment = await mercadoPagoService.createPixPayment({
         transactionAmount: Number(product.price),
         description: `${product.name} - SaaS PIX Bot`,
-        payerEmail: `${telegramId}@telegram.user`,
+        // FIX #6: payerEmail removido — buildPayerEmail() interno no mercadoPagoService
         payerName: firstName || username || 'Usuário Telegram',
         externalReference: payment.id,
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
