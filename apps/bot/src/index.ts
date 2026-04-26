@@ -211,8 +211,12 @@ bot.action(/^confirm_payment_(.+)$/, async (ctx) => {
     const errMsg = error instanceof Error ? error.message : 'Erro desconhecido';
     logger.error(`Erro ao gerar PIX para ${userId}:`, error);
 
+    const isTimeout = errMsg.toLowerCase().includes('timeout') || errMsg.toLowerCase().includes('econnreset');
+    
     await ctx.replyWithMarkdown(
-      `❌ *Erro ao gerar pagamento*\n\n${errMsg}\n\nTente novamente em alguns instantes.`,
+      isTimeout
+        ? `⏳ *Demorou um pouquinho mais que o esperado...*\n\nNão se preocupe! Isso acontece às vezes.\nÉ só clicar em *Tentar Novamente* abaixo que vai funcionar 😊`
+        : `⚠️ *Algo deu errado ao gerar o PIX*\n\nNão se preocupe, seu dinheiro não foi cobrado.\nClique em *Tentar Novamente* para gerar um novo código.`,
       Markup.inlineKeyboard([
         [Markup.button.callback('🔄 Tentar Novamente', `confirm_payment_${productId}`)],
         [Markup.button.callback('◀️ Voltar', 'show_products')],
