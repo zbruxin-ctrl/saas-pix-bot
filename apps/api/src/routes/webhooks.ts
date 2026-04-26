@@ -3,6 +3,8 @@
 // Se o create falhar por unique constraint, o concorrente verifica o status existente:
 //   - RECEIVED: tenta assumir o lock com updateMany WHERE status=RECEIVED
 //   - qualquer outro: aborta
+// FIX WEBHOOK-KEY: eventType agora usa `action` (ex: "payment.updated") quando disponível,
+//   evitando colisão de unique constraint entre payment.created e payment.updated.
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma, WebhookEventStatus } from '@prisma/client';
@@ -15,7 +17,7 @@ import { env } from '../config/env';
 
 export const webhooksRouter = Router();
 
-const HANDLED_EVENTS = ['payment'];
+const HANDLED_ACTIONS = ['payment.updated', 'payment.created', 'payment'];
 const APPROVED_STATUS = 'approved';
 
 const WEBHOOK_SECRET_PLACEHOLDER = 'dev_placeholder_troque_em_producao';
@@ -61,23 +63,27 @@ webhooksRouter.post(
       logger.warn('Webhook aceito SEM valida\u00e7\u00e3o HMAC \u2014 configure MERCADO_PAGO_WEBHOOK_SECRET');
     }
 
-    const eventType = payload.type as string;
+    const eventType = payload.type as string | undefined;
     const dataId = (payload.data as { id?: string })?.id;
-    const action = payload.action as string;
+    const action = payload.action as string | undefined;
+
+    // Usa action como chave de evento quando dispon\u00edvel (ex: "payment.updated"),
+    // pois o eventType ("payment") \u00e9 o mesmo para created e updated.
+    const resolvedEventType = action || eventType || 'unknown';
 
     logger.info(`Webhook recebido: tipo=${eventType} | action=${action} | id=${dataId}`);
 
     // Responde 200 imediatamente para o MP n\u00e3o retentar por timeout
     res.status(200).json({ status: 'received' });
 
-    processWebhookAsync(eventType, dataId, payload).catch((error) => {
+    processWebhookAsync(resolvedEventType, dataId, payload).catch((error) => {
       logger.error('Erro no processamento ass\u00edncrono do webhook:', error);
     });
   }
 );
 
 async function processWebhookAsync(
-  eventType: string,
+  resolvedEventType: string,
   externalId: string | undefined,
   rawPayload: Record<string, unknown>
 ): Promise<void> {
@@ -86,8 +92,8 @@ async function processWebhookAsync(
     return;
   }
 
-  if (!HANDLED_EVENTS.includes(eventType)) {
-    logger.info(`Webhook: tipo ${eventType} ignorado`);
+  if (!HANDLED_ACTIONS.includes(resolvedEventType)) {
+    logger.info(`Webhook: tipo ${resolvedEventType} ignorado`);
     return;
   }
 
@@ -100,7 +106,7 @@ async function processWebhookAsync(
     const created = await prisma.webhookEvent.create({
       data: {
         provider: 'mercado_pago',
-        eventType,
+        eventType: resolvedEventType,
         externalId,
         rawPayload: rawPayload as unknown as Prisma.InputJsonValue,
         status: WebhookEventStatus.PROCESSING,
@@ -115,7 +121,7 @@ async function processWebhookAsync(
         provider_externalId_eventType: {
           provider: 'mercado_pago',
           externalId,
-          eventType,
+          eventType: resolvedEventType,
         },
       },
       select: { id: true, status: true },
@@ -145,7 +151,7 @@ async function processWebhookAsync(
     webhookEventId = existing.id;
   }
 
-  // Apenas UM processo chega aqui por externalId+eventType
+  // Apenas UM processo chega aqui por externalId+resolvedEventType
   try {
     const mpPayment = await mercadoPagoService.getPaymentById(externalId);
 
