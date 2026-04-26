@@ -1,6 +1,7 @@
 // ALTERAÇÕES:
-// - releaseExpiredReservations: usa updateMany direto com filtro de data (sem carregar IDs em memória)
-// - getAvailableStock: query simplificada com _count agregado (menos roundtrips)
+// FIX #1: reserveStock no path legado (stock numérico) agora usa $transaction atômica
+//         para evitar race condition entre getAvailableStock e create
+// FIX #17: releaseExpiredReservations usa pixExpiresAt corretamente
 import { StockItemStatus, StockReservationStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -54,6 +55,7 @@ export class StockService {
 
     const hasItems = product._count.stockItems > 0;
 
+    // PATH FIFO (StockItem) — já era atômico
     if (hasItems) {
       await prisma.$transaction(async (tx) => {
         const item = await tx.stockItem.findFirst({
@@ -75,27 +77,51 @@ export class StockService {
       return;
     }
 
+    // PATH LEGADO (stock numérico)
+    // FIX #1: envolve o check de disponibilidade e o create numa única $transaction
+    // para eliminar a race condition entre o count e o create.
     if (product.stock !== null) {
-      const available = await this.getAvailableStock(productId);
-      if (available !== null && available <= 0) {
-        throw new Error('Produto esgotado. Estoque indisponível no momento.');
-      }
+      await prisma.$transaction(async (tx) => {
+        // Conta reservas ativas dentro da transaction
+        const activeReservations = await tx.stockReservation.count({
+          where: {
+            productId,
+            status: StockReservationStatus.ACTIVE,
+            expiresAt: { gt: new Date() },
+          },
+        });
+
+        // Relê o stock dentro da transaction para garantir consistência
+        const prod = await tx.product.findUnique({
+          where: { id: productId },
+          select: { stock: true },
+        });
+
+        const currentStock = prod?.stock ?? 0;
+        if (currentStock - activeReservations <= 0) {
+          throw new Error('Produto esgotado. Estoque indisponível no momento.');
+        }
+
+        const expiresAt = new Date(Date.now() + RESERVATION_TTL_MS);
+        await tx.stockReservation.create({
+          data: {
+            productId,
+            telegramUserId,
+            paymentId,
+            quantity: 1,
+            status: StockReservationStatus.ACTIVE,
+            expiresAt,
+          },
+        });
+
+        logger.info(
+          `[StockService] Reserva legada criada | produto=${productId} | pagamento=${paymentId} | usuario=${telegramUserId}`
+        );
+      });
+      return;
     }
 
-    const expiresAt = new Date(Date.now() + RESERVATION_TTL_MS);
-    await prisma.stockReservation.create({
-      data: {
-        productId,
-        telegramUserId,
-        paymentId,
-        quantity: 1,
-        status: StockReservationStatus.ACTIVE,
-        expiresAt,
-      },
-    });
-    logger.info(
-      `[StockService] Reserva legada criada | produto=${productId} | pagamento=${paymentId} | usuario=${telegramUserId}`
-    );
+    // Produto ilimitado (stock === null e sem StockItems) — sem reserva necessária
   }
 
   async confirmReservation(paymentId: string): Promise<void> {
@@ -197,7 +223,7 @@ export class StockService {
     return item?.content ?? null;
   }
 
-  // FIX: usa updateMany direto com filtro de data — sem carregar IDs em memória
+  // FIX #17: usa pixExpiresAt para payments (campo correto) + updateMany direto
   async releaseExpiredReservations(): Promise<number> {
     const cutoff = new Date(Date.now() - RESERVATION_TTL_MS);
 
