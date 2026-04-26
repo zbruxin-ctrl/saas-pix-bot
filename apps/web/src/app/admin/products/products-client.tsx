@@ -361,7 +361,6 @@ export default function ProductsClient() {
         ? parseInt(form.stock, 10)
         : null;
 
-      // Constrói o payload campo a campo para evitar conflito de tipos com Partial<ProductDTO>
       const payload: ProductPayload = {
         name: form.name,
         description: form.description,
@@ -383,9 +382,10 @@ export default function ProductsClient() {
         toast('Produto criado com sucesso!', 'success');
       }
 
+      // Sincroniza mídias extras separadamente (sem re-salvar o produto)
       if (savedId) {
         const validMedias = medias.filter((m) => m.url.trim());
-        await updateProductMedias(savedId, validMedias, payload).catch(() =>
+        await updateProductMedias(savedId, validMedias).catch(() =>
           toast('Produto salvo, mas erro ao salvar mídias extras.', 'error')
         );
       }
