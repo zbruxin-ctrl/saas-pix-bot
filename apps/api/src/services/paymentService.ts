@@ -1,7 +1,6 @@
 // paymentService.ts — cria pagamentos PIX com reserva FIFO via StockItem
-// FIX #1: removido getAvailableStock() antes da criação do payment
-//         (race condition — o check atômico já ocorre dentro de reserveStock)
-// FIX #6: removido campo payerEmail do DTO — mercadoPagoService gera internamente
+// FIX #5: processApprovedPayment usa updateMany com WHERE status=PENDING dentro da transaction
+//         para garantir que apenas um dos webhooks duplicados do MP processe o pagamento
 import { PaymentStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -21,10 +20,6 @@ export class PaymentService {
       where: { id: productId, isActive: true },
     });
     if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
-
-    // FIX #1: Não fazemos mais getAvailableStock() aqui.
-    // O check de disponibilidade ocorre atomicamente dentro de reserveStock(),
-    // eliminando a race condition entre o check e a reserva.
 
     const telegramUser = await prisma.telegramUser.upsert({
       where: { telegramId },
@@ -76,7 +71,6 @@ export class PaymentService {
       const mpPayment = await mercadoPagoService.createPixPayment({
         transactionAmount: Number(product.price),
         description: `${product.name} - SaaS PIX Bot`,
-        // FIX #6: payerEmail removido — buildPayerEmail() interno no mercadoPagoService
         payerName: firstName || username || 'Usuário Telegram',
         externalReference: payment.id,
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
@@ -150,11 +144,19 @@ export class PaymentService {
       return;
     }
 
+    // FIX #5: usa updateMany com WHERE status=PENDING como guarda atômica.
+    // Se dois webhooks chegarem simultaneamente, apenas o primeiro vai atualizar
+    // (count === 1) e o segundo vai encontrar count === 0 e sair sem criar Order duplicada.
     const order = await prisma.$transaction(async (tx) => {
-      await tx.payment.update({
-        where: { id: paymentId },
+      const updated = await tx.payment.updateMany({
+        where: { id: paymentId, status: PaymentStatus.PENDING },
         data: { status: PaymentStatus.APPROVED, approvedAt: new Date() },
       });
+
+      if (updated.count === 0) {
+        // Outro processo já atualizou este pagamento — sai sem criar Order
+        return null;
+      }
 
       const newOrder = await tx.order.create({
         data: {
@@ -167,6 +169,11 @@ export class PaymentService {
 
       return newOrder;
     });
+
+    if (!order) {
+      logger.info(`Pagamento ${paymentId} já foi aprovado por outro processo. Ignorando.`);
+      return;
+    }
 
     await stockService.confirmReservation(paymentId);
     await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
