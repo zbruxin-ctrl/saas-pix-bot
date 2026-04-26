@@ -1,9 +1,9 @@
-// Tipos compartilhados entre todos os apps do monorepo
-
+// packages/shared/src/index.ts — tipos compartilhados alinhados com Prisma schema
 export type PaymentStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED' | 'REFUNDED';
-export type DeliveryType = 'TEXT' | 'LINK' | 'TOKEN' | 'ACCOUNT';
-export type OrderStatus = 'PROCESSING' | 'DELIVERED' | 'FAILED';
-export type AdminRole = 'SUPER_ADMIN' | 'ADMIN' | 'OPERATOR';
+export type DeliveryType = 'TEXT' | 'LINK' | 'FILE_MEDIA' | 'ACCOUNT';
+export type OrderStatus = 'PROCESSING' | 'DELIVERED' | 'FAILED' | 'CANCELLED';
+export type AdminRole = 'SUPERADMIN' | 'ADMIN' | 'OPERATOR';
+export type StockItemStatus = 'AVAILABLE' | 'RESERVED' | 'CONFIRMED' | 'DELIVERED' | 'RELEASED';
 
 export interface ProductDTO {
   id: string;
@@ -14,6 +14,14 @@ export interface ProductDTO {
   isActive: boolean;
   stock?: number | null;
   metadata?: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface StockItemDTO {
+  id: string;
+  productId: string;
+  content: string;
+  status: StockItemStatus;
   createdAt: string;
 }
 
@@ -65,7 +73,7 @@ export interface CreatePaymentResponse {
   pixQrCode: string;      // base64
   pixQrCodeText: string;  // copia e cola
   amount: number;
-  expiresAt: string;
+  expiresAt: string;      // ISO 8601
   productName: string;
 }
 

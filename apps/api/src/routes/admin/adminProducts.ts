@@ -1,4 +1,4 @@
-// Rota admin de produtos — DeliveryType simplificado + gerenciamento de mídias
+// routes/admin/adminProducts.ts — roles corrigidas (SUPERADMIN) + DeliveryType alinhado
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -7,7 +7,6 @@ import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
 
 export const adminProductsRouter = Router();
 
-// Tipos de entrega simplificados
 const productSchema = z.object({
   name: z.string().min(2).max(100),
   description: z.string().min(5).max(500),
@@ -19,8 +18,8 @@ const productSchema = z.object({
   metadata: z.record(z.unknown()).nullable().optional(),
 });
 
-// GET /api/admin/products
 adminProductsRouter.get('/', async (_req, res: Response) => {
+<<<<<<< HEAD
   const products = await prisma.product.findMany({
     orderBy: { createdAt: 'desc' },
   });
@@ -51,9 +50,21 @@ adminProductsRouter.get('/:id', async (req: AuthenticatedRequest, res: Response)
 });
 
 // POST /api/admin/products
+=======
+  const products = await prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
+  res.json({ success: true, data: products.map((p) => ({ ...p, price: Number(p.price) })) });
+});
+
+adminProductsRouter.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+  if (!product) return res.status(404).json({ success: false, error: 'Produto não encontrado' });
+  res.json({ success: true, data: { ...product, price: Number(product.price) } });
+});
+
+>>>>>>> 5d6c0b3 (descrição do que mudou)
 adminProductsRouter.post(
   '/',
-  requireRole('ADMIN', 'SUPER_ADMIN'),
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = productSchema.parse(req.body);
 
@@ -71,10 +82,9 @@ adminProductsRouter.post(
   }
 );
 
-// PUT /api/admin/products/:id
 adminProductsRouter.put(
   '/:id',
-  requireRole('ADMIN', 'SUPER_ADMIN'),
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = productSchema.partial().parse(req.body);
 
@@ -93,10 +103,9 @@ adminProductsRouter.put(
   }
 );
 
-// DELETE (soft delete) /api/admin/products/:id
 adminProductsRouter.delete(
   '/:id',
-  requireRole('SUPER_ADMIN'),
+  requireRole('SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     await prisma.product.update({
       where: { id: req.params.id },
@@ -107,8 +116,47 @@ adminProductsRouter.delete(
   }
 );
 
-// ─── Mídias de entrega por pedido ──────────────────────────────────────────
+// ─── StockItem CRUD (para cadastrar unidades individuais de estoque FIFO) ────
+const stockItemSchema = z.object({
+  content: z.string().min(1),
+});
 
+// GET /api/admin/products/:productId/stock-items
+adminProductsRouter.get(
+  '/:productId/stock-items',
+  async (req: AuthenticatedRequest, res: Response) => {
+    const items = await prisma.stockItem.findMany({
+      where: { productId: req.params.productId },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({ success: true, data: items });
+  }
+);
+
+// POST /api/admin/products/:productId/stock-items
+adminProductsRouter.post(
+  '/:productId/stock-items',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { content } = stockItemSchema.parse(req.body);
+    const item = await prisma.stockItem.create({
+      data: { productId: req.params.productId, content, status: 'AVAILABLE' },
+    });
+    res.status(201).json({ success: true, data: item });
+  }
+);
+
+// DELETE /api/admin/products/stock-items/:itemId
+adminProductsRouter.delete(
+  '/stock-items/:itemId',
+  requireRole('SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    await prisma.stockItem.delete({ where: { id: req.params.itemId } });
+    res.json({ success: true });
+  }
+);
+
+// ─── Mídias de entrega por pedido ─────────────────────────────────────────────
 const mediaSchema = z.object({
   url: z.string().url(),
   mediaType: z.enum(['IMAGE', 'VIDEO', 'FILE']),
@@ -116,6 +164,7 @@ const mediaSchema = z.object({
   sortOrder: z.number().int().default(0),
 });
 
+<<<<<<< HEAD
 // GET /api/admin/orders/:orderId/medias
 adminProductsRouter.get(
   '/orders/:orderId/medias',
@@ -128,11 +177,19 @@ adminProductsRouter.get(
     res.json({ success: true, data: medias });
   }
 );
+=======
+adminProductsRouter.get('/orders/:orderId/medias', async (req: AuthenticatedRequest, res: Response) => {
+  const medias = await prisma.deliveryMedia.findMany({
+    where: { orderId: req.params.orderId },
+    orderBy: { sortOrder: 'asc' },
+  });
+  res.json({ success: true, data: medias });
+});
+>>>>>>> 5d6c0b3 (descrição do que mudou)
 
-// POST /api/admin/orders/:orderId/medias
 adminProductsRouter.post(
   '/orders/:orderId/medias',
-  requireRole('ADMIN', 'SUPER_ADMIN'),
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     const data = mediaSchema.parse(req.body);
 
@@ -144,10 +201,9 @@ adminProductsRouter.post(
   }
 );
 
-// DELETE /api/admin/orders/medias/:mediaId
 adminProductsRouter.delete(
   '/orders/medias/:mediaId',
-  requireRole('ADMIN', 'SUPER_ADMIN'),
+  requireRole('ADMIN', 'SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     await prisma.deliveryMedia.delete({ where: { id: req.params.mediaId } });
     res.json({ success: true });
