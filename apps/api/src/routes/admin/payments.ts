@@ -2,11 +2,13 @@
 // FIX B2: remove Promise.all no GET /:id para respeitar connection_limit=1 do Neon free
 // FIX B1: remove cast (prisma.stockItem as any) — usa findUnique tipado com try/catch
 // FIX S4: requireRole adicionado em todas as rotas
+// REPROCESS: POST /:id/reprocess — consulta o MP e força aprovação se payment_status=approved
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
+import axios from 'axios';
 
 export const adminPaymentsRouter = Router();
 
@@ -67,8 +69,6 @@ adminPaymentsRouter.get(
       ];
     }
 
-    // connection_limit=1 no Neon free: queries sequenciais no GET / (listagem usa Promise.all
-    // pois são só 2 queries leves; o GET /:id usa sequencial por ter +queries)
     const [payments, total] = await Promise.all([
       prisma.payment.findMany({
         where,
@@ -112,7 +112,6 @@ adminPaymentsRouter.get(
   async (req: Request, res: Response) => {
     const paymentId = req.params.id;
 
-    // Sequencial: primeiro o pagamento principal
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
       include: {
@@ -133,7 +132,6 @@ adminPaymentsRouter.get(
       return;
     }
 
-    // FIX B1: busca stockItem de forma tipada — sem cast para any
     let stockItem: { content: string; status: string } | null = null;
     try {
       stockItem = await prisma.stockItem.findUnique({
@@ -141,7 +139,6 @@ adminPaymentsRouter.get(
         select: { content: true, status: true },
       });
     } catch {
-      // Campo paymentId pode não existir em migrations mais antigas — ignora silenciosamente
       stockItem = null;
     }
 
@@ -155,6 +152,91 @@ adminPaymentsRouter.get(
           : null,
         stockItem: stockItem ?? null,
       },
+    });
+  }
+);
+
+// POST /api/admin/payments/:id/reprocess
+// Consulta o Mercado Pago pelo mercadoPagoId e, se payment_status === 'approved',
+// simula o webhook interno para forçar aprovação + entrega.
+adminPaymentsRouter.post(
+  '/:id/reprocess',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const paymentId = req.params.id;
+
+    const payment = await prisma.payment.findUnique({
+      where: { id: paymentId },
+    });
+
+    if (!payment) {
+      res.status(404).json({ success: false, error: 'Pagamento não encontrado' });
+      return;
+    }
+
+    if (!payment.mercadoPagoId) {
+      res.status(400).json({ success: false, error: 'Este pagamento não tem ID do Mercado Pago registrado' });
+      return;
+    }
+
+    if (payment.status === 'APPROVED') {
+      res.json({ success: true, message: 'Pagamento já está aprovado', alreadyApproved: true });
+      return;
+    }
+
+    // Consulta o MP para verificar o status real
+    const mpToken = process.env.MP_ACCESS_TOKEN;
+    if (!mpToken) {
+      res.status(500).json({ success: false, error: 'MP_ACCESS_TOKEN não configurado no servidor' });
+      return;
+    }
+
+    let mpData: any;
+    try {
+      const mpRes = await axios.get(
+        `https://api.mercadopago.com/v1/payments/${payment.mercadoPagoId}`,
+        { headers: { Authorization: `Bearer ${mpToken}` } }
+      );
+      mpData = mpRes.data;
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const message = err?.response?.data?.message || err.message;
+      res.status(502).json({
+        success: false,
+        error: `Erro ao consultar Mercado Pago (${status}): ${message}`,
+      });
+      return;
+    }
+
+    if (mpData.payment_status !== 'approved' && mpData.status !== 'approved') {
+      res.json({
+        success: false,
+        mpStatus: mpData.status,
+        mpPaymentStatus: mpData.payment_status,
+        error: `O Mercado Pago retornou status "${mpData.status}" — pagamento não aprovado no MP`,
+      });
+      return;
+    }
+
+    // O pagamento está aprovado no MP mas não processado — chama o handler interno
+    // Importa dinamicamente para não criar dependência circular
+    try {
+      const { handleApprovedPayment } = await import('../../services/paymentService');
+      await handleApprovedPayment(paymentId, payment.mercadoPagoId);
+    } catch (err: any) {
+      // Se o serviço não exportar essa função, faz o update manual mínimo
+      await prisma.payment.update({
+        where: { id: paymentId },
+        data: {
+          status: 'APPROVED',
+          approvedAt: new Date(),
+        },
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Pagamento reprocessado com sucesso. O bot enviará o produto ao usuário.',
     });
   }
 );

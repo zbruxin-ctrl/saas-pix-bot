@@ -1,10 +1,11 @@
 // ALTERAÇÕES: exibe stockItem.content (conteúdo entregue), deliveryMedias,
-// cancelledAt, isBlocked do usuário, e medias do pedido
+// cancelledAt, isBlocked do usuário, medias do pedido
+// + botão "Forçar Aprovação" para pagamentos PENDING com ID no MP
 'use client';
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { getPayment } from '@/lib/api';
+import { getPayment, reprocessPayment } from '@/lib/api';
 import StatusBadge from '@/components/admin/StatusBadge';
 import { formatCurrency, formatDate } from '@/lib/utils';
 
@@ -70,6 +71,9 @@ export default function PaymentDetailPage() {
   const router = useRouter();
   const [payment, setPayment] = useState<Payment | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessResult, setReprocessResult] = useState<string | null>(null);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
 
   useEffect(() => {
     getPayment(id)
@@ -77,6 +81,34 @@ export default function PaymentDetailPage() {
       .catch(() => router.push('/admin/payments'))
       .finally(() => setLoading(false));
   }, [id, router]);
+
+  async function handleReprocess() {
+    if (!payment) return;
+    setReprocessing(true);
+    setReprocessResult(null);
+    setReprocessError(null);
+    try {
+      const result = await reprocessPayment(payment.id);
+      if (result.success) {
+        setReprocessResult(result.message || 'Pagamento aprovado com sucesso!');
+        // Recarrega os dados do pagamento após 1.5s
+        setTimeout(() => {
+          getPayment(id).then(setPayment as any).catch(() => {});
+        }, 1500);
+      } else {
+        setReprocessError(
+          result.error ||
+            `Status no MP: ${result.mpStatus || 'desconhecido'}. O pagamento ainda não está aprovado no Mercado Pago.`
+        );
+      }
+    } catch (err: any) {
+      setReprocessError(
+        err?.response?.data?.error || 'Erro de conexão ao tentar reprocessar. Verifique os logs da API.'
+      );
+    } finally {
+      setReprocessing(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -96,17 +128,52 @@ export default function PaymentDetailPage() {
   const webhookEvents = payment.webhookEvents || [];
   const stockItem = payment.stockItem;
 
+  const isPending = payment.status === 'PENDING';
+  const hasMpId = !!payment.mercadoPagoId;
+
   return (
     <div className="space-y-6 max-w-4xl">
-      <div className="flex items-center gap-4">
-        <button
-          onClick={() => router.back()}
-          className="text-gray-500 hover:text-gray-700 text-sm"
-        >
-          ← Voltar
-        </button>
-        <h1 className="text-2xl font-bold text-gray-900">Detalhes do Pagamento</h1>
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => router.back()}
+            className="text-gray-500 hover:text-gray-700 text-sm"
+          >
+            ← Voltar
+          </button>
+          <h1 className="text-2xl font-bold text-gray-900">Detalhes do Pagamento</h1>
+        </div>
+
+        {/* Botão de reprocessamento — só aparece em pagamentos PENDING com ID do MP */}
+        {isPending && hasMpId && (
+          <button
+            onClick={handleReprocess}
+            disabled={reprocessing}
+            className="flex items-center gap-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-sm font-medium px-4 py-2 transition-colors"
+          >
+            {reprocessing ? (
+              <>
+                <span className="animate-spin inline-block h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                Verificando no MP...
+              </>
+            ) : (
+              '🔄 Forçar Aprovação'
+            )}
+          </button>
+        )}
       </div>
+
+      {/* Resultado do reprocessamento */}
+      {reprocessResult && (
+        <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800 font-medium">
+          ✅ {reprocessResult}
+        </div>
+      )}
+      {reprocessError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
+          ❌ {reprocessError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Pagamento */}

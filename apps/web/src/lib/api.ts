@@ -67,14 +67,9 @@ export async function getDashboard(): Promise<{
 
 // ─── Products ─────────────────────────────────────────────────────────────────
 
-/**
- * A API retorna { success: true, data: { data: ProductDTO[], total: number } }
- * (resposta paginada). Precisamos extrair o array interno.
- */
 export async function getProducts(): Promise<ProductDTO[]> {
   const res = await api.get<ApiResponse<{ data: ProductDTO[]; total: number }>>('/admin/products');
   const payload = res.data.data;
-  // payload pode ser { data: [...], total: N } ou diretamente um array (fallback)
   if (Array.isArray(payload)) return payload;
   if (payload && Array.isArray((payload as any).data)) return (payload as any).data;
   return [];
@@ -180,6 +175,13 @@ export async function getPayments(
 export async function getPayment(id: string): Promise<PaymentDTO> {
   const res = await api.get<ApiResponse<PaymentDTO>>(`/admin/payments/${id}`);
   return data(res);
+}
+
+export async function reprocessPayment(
+  id: string
+): Promise<{ success: boolean; message?: string; error?: string; mpStatus?: string; alreadyApproved?: boolean }> {
+  const res = await api.post(`/admin/payments/${id}/reprocess`);
+  return res.data;
 }
 
 // ─── Delivery Medias (por pedido) ─────────────────────────────────────────────
