@@ -169,12 +169,7 @@ export class PaymentService {
 
     await stockService.confirmReservation(paymentId);
     await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
-    await telegramService.sendPaymentConfirmation(
-      payment.telegramUser.telegramId,
-      payment.product.name,
-      Number(payment.amount)
-    );
-  }
+    // sendPaymentConfirmation removido — deliveryService já envia a mensagem de confirmação
 
   async cancelExpiredPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
