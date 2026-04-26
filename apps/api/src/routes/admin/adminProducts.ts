@@ -1,13 +1,11 @@
 // routes/admin/adminProducts.ts
-// FIX B6/CRÍTICO: POST /upload registrado ANTES de /:id
-// FIX M7: GET /stock consolidado por produto
-// FIX: upload usa Cloudinary quando CLOUDINARY_URL está configurado, diskStorage como fallback
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
-import multer from 'multer';
+import multer, { FileFilterCallback, StorageEngine } from 'multer';
+import { Request } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { logger } from '../../lib/logger';
@@ -30,13 +28,14 @@ const listQuerySchema = z.object({
   perPage: z.string().default('20').transform(Number),
 });
 
-// ─── Multer: Cloudinary quando disponível, diskStorage como fallback ─────────
+// ─── Multer: diskStorage com fallback para Cloudinary ────────────────────────
 const uploadDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
+const storage: StorageEngine = multer.diskStorage({
+  destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) =>
+    cb(null, uploadDir),
+  filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
     const ext = path.extname(file.originalname);
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
   },
@@ -45,7 +44,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
-  fileFilter: (_req, file, cb) => {
+  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
     const allowed = /image|video|application\/pdf|application\/zip|application\/octet-stream/;
     if (allowed.test(file.mimetype)) cb(null, true);
     else cb(new Error('Tipo de arquivo não permitido'));
@@ -62,10 +61,8 @@ async function uploadToCloudinary(
   if (!cloudinaryUrl) return null;
 
   try {
-    // Import dinâmico para não quebrar se cloudinary não estiver instalado
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { v2: cloudinary } = require('cloudinary');
-    // cloudinary.config() lê CLOUDINARY_URL automaticamente
     const isVideo = /video/i.test(mimetype);
     const result = await cloudinary.uploader.upload(filePath, {
       resource_type: isVideo ? 'video' : 'auto',
@@ -80,14 +77,13 @@ async function uploadToCloudinary(
 }
 
 // ─── CRÍTICO: /upload DEVE vir ANTES de /:id ─────────────────────────────────
-// Se /upload vier depois, o Express interpreta 'upload' como :id e nunca alcança esta rota.
 
 // POST /api/admin/products/upload
 adminProductsRouter.post(
   '/upload',
   requireRole('ADMIN', 'SUPERADMIN'),
   upload.single('file'),
-  async (req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest & { file?: Express.Multer.File }, res: Response) => {
     if (!req.file) {
       res.status(400).json({ success: false, error: 'Nenhum arquivo enviado' });
       return;
@@ -101,11 +97,9 @@ adminProductsRouter.post(
     );
 
     if (cloudinaryResult) {
-      // Remove arquivo local após upload bem-sucedido ao Cloudinary
       fs.unlink(req.file.path, () => {});
       url = cloudinaryResult;
     } else {
-      // Fallback: serve o arquivo pelo próprio servidor (Railway)
       const baseUrl = process.env.API_URL ?? '';
       url = `${baseUrl}/uploads/${req.file.filename}`;
     }
@@ -160,7 +154,6 @@ adminProductsRouter.get(
       },
     });
 
-    // Para cada produto com stockItems, conta disponíveis
     const result = await Promise.all(
       products.map(async (p) => {
         if (p._count.stockItems > 0) {
