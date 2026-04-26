@@ -126,8 +126,9 @@ export async function updateProductMedias(
 }
 
 /**
- * Faz upload de um arquivo de mídia e retorna a URL pública.
- * Endpoint: POST /api/proxy/admin/upload (multipart/form-data).
+ * Faz upload de um arquivo de mídia e retorna a URL pública (Cloudinary).
+ * Endpoint: POST /api/proxy/admin/products/upload (multipart/form-data).
+ * A API usa CLOUDINARY_URL automaticamente quando disponível.
  */
 export async function uploadMediaFile(
   file: File,
@@ -137,7 +138,7 @@ export async function uploadMediaFile(
   formData.append('file', file);
   formData.append('mediaType', mediaType);
 
-  const res = await api.post<ApiResponse<{ url: string }>>('/admin/upload', formData, {
+  const res = await api.post<ApiResponse<{ url: string }>>('/admin/products/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 
