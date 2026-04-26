@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ProductDTO } from '@saas-pix/shared';
 import {
   getProducts,
   createProduct,
@@ -15,17 +16,8 @@ import { formatCurrency } from '@/lib/utils';
 import { toast } from '@/components/admin/Toast';
 import ConfirmModal from '@/components/admin/ConfirmModal';
 
-interface Product {
-  id: string;
-  name: string;
-  description: string;
-  price: number;
-  deliveryType: string;
-  deliveryContent: string;
-  isActive: boolean;
-  stock: number | null;
-  _count?: { payments: number; orders: number };
-}
+// Usa ProductDTO do shared diretamente — elimina o conflito de tipos com getProducts()
+type Product = ProductDTO;
 
 interface DeliveryItem {
   id: string;
@@ -295,7 +287,7 @@ export default function ProductsClient() {
       description: p.description,
       price: String(p.price),
       deliveryType: p.deliveryType,
-      deliveryContent: p.deliveryContent || '',
+      deliveryContent: p.deliveryContent ?? '',
       isActive: p.isActive,
       stock: p.stock != null ? String(p.stock) : '',
     };
@@ -303,7 +295,7 @@ export default function ProductsClient() {
     setForm(f);
     setItems(
       ['ACCOUNT', 'LINK', 'TEXT'].includes(p.deliveryType)
-        ? contentToItems(p.deliveryContent || '[]')
+        ? contentToItems(p.deliveryContent ?? '[]')
         : [newItem()]
     );
     setEditId(p.id);
@@ -355,7 +347,7 @@ export default function ProductsClient() {
       const deliveryContent = usesItemList ? itemsToContent(items) : form.deliveryContent;
       const fifoCount = usesItemList ? items.filter((i) => i.value.trim()).length : null;
 
-      const payload = {
+      const payload: Partial<ProductDTO> = {
         ...form,
         deliveryContent,
         price: parseFloat(form.price),
@@ -374,21 +366,12 @@ export default function ProductsClient() {
       }
 
       if (savedId) {
-  const validMedias = medias.filter((m) => m.url.trim());
+        const validMedias = medias.filter((m) => m.url.trim());
 
-  await updateProductMedias(savedId, validMedias, {
-    name: payload.name,
-    description: payload.description,
-    price: Number(payload.price),
-    deliveryType: payload.deliveryType,
-    deliveryContent: payload.deliveryContent,
-    isActive: payload.isActive,
-    stock: payload.stock,
-    metadata: {},
-  }).catch(() =>
-    toast('Produto salvo, mas erro ao salvar mídias extras.', 'error')
-  );
-}
+        await updateProductMedias(savedId, validMedias, payload).catch(() =>
+          toast('Produto salvo, mas erro ao salvar mídias extras.', 'error')
+        );
+      }
 
       setShowModal(false);
       loadProducts();
@@ -483,7 +466,7 @@ export default function ProductsClient() {
             let itemCount: number | null = null;
 
             try {
-              const parsed = JSON.parse(p.deliveryContent || '');
+              const parsed = JSON.parse(p.deliveryContent ?? '');
               if (Array.isArray(parsed)) itemCount = parsed.length;
             } catch {}
 
