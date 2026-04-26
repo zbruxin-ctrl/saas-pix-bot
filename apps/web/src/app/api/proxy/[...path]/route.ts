@@ -1,25 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// API_URL é server-side only. Configure no Vercel em:
-// Settings → Environment Variables → API_URL = https://api-production-a596.up.railway.app
 const API_URL =
   process.env.API_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
   'https://api-production-a596.up.railway.app';
+
+/**
+ * O Express assina cookies com cookieParser — o valor fica como "s%3AJWT..."
+ * (ou "s:JWT..." decodificado). O JWT puro começa depois do prefixo.
+ * Precisamos remover isso antes de mandar como Bearer.
+ */
+function extractJwt(raw: string): string {
+  // decodifica URL encoding: s%3A → s:
+  const decoded = decodeURIComponent(raw);
+  // remove prefixo de assinatura: "s:" seguido do JWT e "." + assinatura HMAC
+  if (decoded.startsWith('s:')) {
+    // formato: s:<jwt>.<hmac_signature>
+    // o JWT em si é tudo entre "s:" e o último "."
+    const withoutPrefix = decoded.slice(2); // remove "s:"
+    // o JWT tem 3 partes separadas por "."; a assinatura do cookie é uma 4ª parte
+    // ex: header.payload.jwtSig.cookieSig
+    const parts = withoutPrefix.split('.');
+    if (parts.length >= 4) {
+      // reconstrói apenas as 3 partes do JWT
+      return parts.slice(0, 3).join('.');
+    }
+    return withoutPrefix;
+  }
+  return raw;
+}
 
 async function proxyRequest(request: NextRequest, method: string): Promise<NextResponse> {
   const url = request.nextUrl;
   const segments = url.pathname.replace('/api/proxy/', '');
   const targetUrl = `${API_URL}/api/${segments}${url.search}`;
 
-  // Extrai o auth_token do cookie (setado pelo Next.js login route)
-  const authToken = request.cookies.get('auth_token')?.value;
+  const rawToken = request.cookies.get('auth_token')?.value;
+  const authToken = rawToken ? extractJwt(rawToken) : null;
 
   const headers: Record<string, string> = {
     'Content-Type': request.headers.get('content-type') || 'application/json',
   };
 
-  // Envia o token como Bearer — o middleware da API aceita cookie e Authorization: Bearer
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
