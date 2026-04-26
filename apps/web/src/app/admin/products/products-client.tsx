@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ProductDTO } from '@saas-pix/shared';
+import type { ProductDTO, DeliveryType } from '@saas-pix/shared';
 import {
   getProducts,
   createProduct,
@@ -355,6 +355,7 @@ export default function ProductsClient() {
 
       const payload: Partial<ProductDTO> & { deliveryContent?: string } = {
         ...form,
+        deliveryType: form.deliveryType as DeliveryType,
         deliveryContent,
         price: parseFloat(form.price),
         stock: usesItemList ? fifoCount : form.stock ? parseInt(form.stock) : null,
