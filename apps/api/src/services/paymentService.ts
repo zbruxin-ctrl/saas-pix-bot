@@ -89,7 +89,12 @@ export class PaymentService {
           mercadoPagoId: String(mpPayment.id),
           pixQrCode: mpPayment.point_of_interaction.transaction_data.qr_code_base64,
           pixQrCodeText: mpPayment.point_of_interaction.transaction_data.qr_code,
-          pixExpiresAt: new Date(mpPayment.date_of_expiration),
+          pixExpiresAt: (() => {
+            // MP retorna sem 'Z' mas no horário local do servidor — força interpretação correta
+            const raw = mpPayment.date_of_expiration;
+            // Se já tem offset (+00:00 ou Z), usa direto; senão assume UTC e ajusta
+            return new Date(raw.includes('+') || raw.endsWith('Z') ? raw : raw + '-03:00');
+          })(),
           status: PaymentStatus.PENDING,
         },
       });
