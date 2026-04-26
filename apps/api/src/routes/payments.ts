@@ -1,4 +1,5 @@
 // Rotas de pagamento (usadas pelo bot)
+// FIX BUG1: adiciona POST /:id/cancel para que o bot possa gravar CANCELLED no banco
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { paymentService } from '../services/paymentService';
@@ -33,6 +34,28 @@ paymentsRouter.post(
       success: true,
       data: result,
     });
+  }
+);
+
+// Cancela um pagamento PENDING a pedido do usuário no bot
+// POST /api/payments/:id/cancel
+// FIX BUG1: antes o bot só parava de mostrar o QR Code localmente;
+// agora grava CANCELLED no banco, liberando o estoque e atualizando o painel.
+paymentsRouter.post(
+  '/:id/cancel',
+  requireBotSecret,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    const result = await paymentService.cancelPayment(id);
+
+    if (!result.cancelled) {
+      res.status(400).json({ success: false, message: result.reason });
+      return;
+    }
+
+    logger.info(`Pagamento ${id} cancelado via bot`);
+    res.json({ success: true, message: result.reason });
   }
 );
 

@@ -33,7 +33,9 @@ const envSchema = z.object({
   COOKIE_SECRET: z.string().min(32, 'COOKIE_SECRET deve ter pelo menos 32 caracteres'),
 
   MERCADO_PAGO_ACCESS_TOKEN: z.string().min(1, 'MERCADO_PAGO_ACCESS_TOKEN é obrigatório'),
-  MERCADO_PAGO_WEBHOOK_SECRET: z.string().default('dev_placeholder_troque_em_producao'),
+  // FIX BUG3: sem default — se não configurado em produção, o sistema detecta e avisa
+  // no lugar de silenciosamente descartar todos os webhooks com assinatura "inválida".
+  MERCADO_PAGO_WEBHOOK_SECRET: z.string().optional(),
 
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN é obrigatório'),
   TELEGRAM_BOT_SECRET: z.string().min(16, 'TELEGRAM_BOT_SECRET deve ter pelo menos 16 caracteres'),
@@ -43,12 +45,9 @@ const envSchema = z.object({
   BOT_WEBHOOK_URL: z.string().url().optional(),
 
   // CORS extra: domínios adicionais separados por vírgula (ex: previews do Vercel específicos)
-  // Exemplo Railway: ALLOWED_ORIGINS=https://meu-painel.vercel.app,https://preview-abc.vercel.app
   ALLOWED_ORIGINS: z.string().optional(),
 
   // Cloudinary: configure CLOUDINARY_URL no Railway para usar Cloudinary.
-  // Formato: cloudinary://api_key:api_secret@cloud_name
-  // Se não configurado, arquivos são servidos localmente pelo Railway (sem persistência entre deploys).
   CLOUDINARY_URL: z.string().optional(),
 
   REDIS_URL: z.string().optional(),

@@ -1,6 +1,7 @@
 // paymentService.ts
 // FIX M10: findExpiredPaymentIds() extrai a query do job para cá
 // FIX B4: usa pixExpiresAt < cutoff (não createdAt) para encontrar PIX vencidos
+// FIX BUG1: adiciona cancelPayment() que grava CANCELLED no banco e libera estoque
 import { PaymentStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -27,6 +28,8 @@ export class PaymentService {
       create: { telegramId, firstName, username },
     });
 
+    // FIX BUG2: exclui pagamentos CANCELLED da reutilização.
+    // Antes, mesmo após cancelar, um novo /comprar retornava o mesmo QR code.
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -97,8 +100,8 @@ export class PaymentService {
 
       return {
         paymentId: updatedPayment.id,
-        pixQrCode: updatedPayment.pixQrCode!,
         pixQrCodeText: updatedPayment.pixQrCodeText!,
+        pixQrCode: updatedPayment.pixQrCode!,
         amount: Number(updatedPayment.amount),
         expiresAt: updatedPayment.pixExpiresAt!.toISOString(),
         productName: product.name,
@@ -113,6 +116,39 @@ export class PaymentService {
   private async productHasStockItems(productId: string): Promise<boolean> {
     const count = await prisma.stockItem.count({ where: { productId } });
     return count > 0;
+  }
+
+  // FIX BUG1: cancela um pagamento PENDING a pedido do usuário no bot.
+  // Grava CANCELLED no banco (visível no painel) e libera o estoque reservado.
+  async cancelPayment(paymentId: string): Promise<{ cancelled: boolean; reason: string }> {
+    const payment = await prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: { telegramUser: true },
+    });
+
+    if (!payment) {
+      return { cancelled: false, reason: 'Pagamento não encontrado.' };
+    }
+
+    if (payment.status !== PaymentStatus.PENDING) {
+      return {
+        cancelled: false,
+        reason: `Pagamento não pode ser cancelado pois está com status ${payment.status}.`,
+      };
+    }
+
+    await prisma.payment.update({
+      where: { id: paymentId },
+      data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
+    });
+
+    await stockService.releaseReservation(paymentId, 'cancelado_pelo_usuario');
+
+    logger.info(
+      `[PaymentService] Pagamento ${paymentId} cancelado pelo usuário ${payment.telegramUser.telegramId}`
+    );
+
+    return { cancelled: true, reason: 'Pagamento cancelado com sucesso.' };
   }
 
   // FIX M10: lógica de busca de pagamentos expirados centralizada aqui
@@ -191,7 +227,6 @@ export class PaymentService {
       include: { telegramUser: true },
     });
 
-    // FIX L2: verifica que pixExpiresAt realmente passou antes de expirar
     if (!payment || payment.status !== PaymentStatus.PENDING) return;
     if (payment.pixExpiresAt && payment.pixExpiresAt > new Date()) {
       logger.warn(`[ExpireJob] Pagamento ${paymentId} com pixExpiresAt no futuro — ignorando`);

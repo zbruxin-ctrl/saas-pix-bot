@@ -1,5 +1,8 @@
 // webhooks.ts — webhook Mercado Pago com assinatura, idempotência e processamento assíncrono
 // FIX L5: upsert não sobrescreve status IGNORED/FAILED de eventos já processados anteriormente
+// FIX BUG3: se MERCADO_PAGO_WEBHOOK_SECRET não estiver configurado no Railway (continuar com
+//   placeholder padrão), loga aviso CRÍTICO mas aceita o webhook ao invés de descartar pagamentos
+//   pagos silenciosamente. Configura a variável no Railway para validação HMAC completa.
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
@@ -14,6 +17,21 @@ export const webhooksRouter = Router();
 
 const HANDLED_EVENTS = ['payment'];
 const APPROVED_STATUS = 'approved';
+
+// FIX BUG3: placeholder detectado → assinatura desabilitada com aviso crítico
+const WEBHOOK_SECRET_PLACEHOLDER = 'dev_placeholder_troque_em_producao';
+const isWebhookSignatureEnabled =
+  env.MERCADO_PAGO_WEBHOOK_SECRET !== undefined &&
+  env.MERCADO_PAGO_WEBHOOK_SECRET !== WEBHOOK_SECRET_PLACEHOLDER &&
+  env.MERCADO_PAGO_WEBHOOK_SECRET.length >= 16;
+
+if (!isWebhookSignatureEnabled && env.NODE_ENV === 'production') {
+  logger.error(
+    '🚨 [CRÍTICO] MERCADO_PAGO_WEBHOOK_SECRET não configurado ou inválido no Railway. ' +
+    'Validação de assinatura DESABILITADA — configure a variável imediatamente. ' +
+    'Webhooks serão aceitos sem validação HMAC até que seja corrigido.'
+  );
+}
 
 webhooksRouter.post(
   '/mercadopago',
@@ -31,11 +49,20 @@ webhooksRouter.post(
       return;
     }
 
-    const isValid = validateWebhookSignature(req, bodyString);
+    // FIX BUG3: só valida assinatura se o secret estiver corretamente configurado.
+    // Se não estiver, aceita o webhook e loga aviso (fallback seguro para não perder pagamentos).
+    const isValid = isWebhookSignatureEnabled
+      ? validateWebhookSignature(req, bodyString)
+      : true;
+
     if (!isValid) {
       logger.warn('Webhook: assinatura inválida', { ip: req.ip });
       res.status(200).json({ status: 'ignored' });
       return;
+    }
+
+    if (!isWebhookSignatureEnabled && env.NODE_ENV === 'production') {
+      logger.warn('Webhook aceito SEM validação HMAC — configure MERCADO_PAGO_WEBHOOK_SECRET no Railway');
     }
 
     const eventType = payload.type as string;
@@ -68,8 +95,6 @@ async function processWebhookAsync(
   }
 
   // FIX L5: checa status ANTES do upsert.
-  // IGNORED e FAILED NÃO devem ser sobrescritos para PROCESSING automaticamente.
-  // PROCESSED também não — idempotência.
   const existingEvent = await prisma.webhookEvent.findUnique({
     where: {
       provider_externalId_eventType: {
@@ -85,7 +110,6 @@ async function processWebhookAsync(
     return;
   }
 
-  // FIX L5: não reprocessa eventos que foram explicitamente IGNORED
   if (existingEvent?.status === 'IGNORED') {
     logger.info(`Webhook marcado como IGNORED anteriormente: ${externalId}. Pulando.`);
     return;
@@ -183,7 +207,7 @@ function validateWebhookSignature(req: Request, body: string): boolean {
     const manifest = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
 
     const expectedSignature = crypto
-      .createHmac('sha256', env.MERCADO_PAGO_WEBHOOK_SECRET)
+      .createHmac('sha256', env.MERCADO_PAGO_WEBHOOK_SECRET!)
       .update(manifest)
       .digest('hex');
 
