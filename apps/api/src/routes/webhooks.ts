@@ -1,8 +1,9 @@
-// webhooks.ts — webhook Mercado Pago com assinatura, idempotência e processamento assíncrono
-// FIX L5: upsert não sobrescreve status IGNORED/FAILED de eventos já processados anteriormente
-// FIX BUG3: se MERCADO_PAGO_WEBHOOK_SECRET não estiver configurado no Railway (continuar com
-//   placeholder padrão), loga aviso CRÍTICO mas aceita o webhook ao invés de descartar pagamentos
-//   pagos silenciosamente. Configura a variável no Railway para validação HMAC completa.
+// webhooks.ts
+// FIX RACE: upsert com constraint UNIQUE (provider, externalId, eventType) garante que
+//   mesmo que o MP dispare vários webhooks simultâneos, apenas UM processa a entrega.
+//   O upsert tenta fazer UPDATE status='PROCESSING' onde status='PENDING' (ou INSERT).
+//   Se o registro já existir com status='PROCESSING'/'PROCESSED'/'IGNORED', o update
+//   não altera nada e retornamos imediatamente.
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
@@ -18,7 +19,6 @@ export const webhooksRouter = Router();
 const HANDLED_EVENTS = ['payment'];
 const APPROVED_STATUS = 'approved';
 
-// FIX BUG3: placeholder detectado → assinatura desabilitada com aviso crítico
 const WEBHOOK_SECRET_PLACEHOLDER = 'dev_placeholder_troque_em_producao';
 const isWebhookSignatureEnabled =
   env.MERCADO_PAGO_WEBHOOK_SECRET !== undefined &&
@@ -27,9 +27,8 @@ const isWebhookSignatureEnabled =
 
 if (!isWebhookSignatureEnabled && env.NODE_ENV === 'production') {
   logger.error(
-    '🚨 [CRÍTICO] MERCADO_PAGO_WEBHOOK_SECRET não configurado ou inválido no Railway. ' +
-    'Validação de assinatura DESABILITADA — configure a variável imediatamente. ' +
-    'Webhooks serão aceitos sem validação HMAC até que seja corrigido.'
+    '\uD83D\uDEA8 [CR\u00cdTICO] MERCADO_PAGO_WEBHOOK_SECRET n\u00e3o configurado ou inv\u00e1lido no Railway. ' +
+    'Valida\u00e7\u00e3o de assinatura DESABILITADA \u2014 configure a vari\u00e1vel imediatamente.'
   );
 }
 
@@ -44,25 +43,23 @@ webhooksRouter.post(
     try {
       payload = JSON.parse(bodyString);
     } catch {
-      logger.warn('Webhook: payload inválido recebido');
-      res.status(400).json({ error: 'Payload inválido' });
+      logger.warn('Webhook: payload inv\u00e1lido recebido');
+      res.status(400).json({ error: 'Payload inv\u00e1lido' });
       return;
     }
 
-    // FIX BUG3: só valida assinatura se o secret estiver corretamente configurado.
-    // Se não estiver, aceita o webhook e loga aviso (fallback seguro para não perder pagamentos).
     const isValid = isWebhookSignatureEnabled
       ? validateWebhookSignature(req, bodyString)
       : true;
 
     if (!isValid) {
-      logger.warn('Webhook: assinatura inválida', { ip: req.ip });
+      logger.warn('Webhook: assinatura inv\u00e1lida', { ip: req.ip });
       res.status(200).json({ status: 'ignored' });
       return;
     }
 
     if (!isWebhookSignatureEnabled && env.NODE_ENV === 'production') {
-      logger.warn('Webhook aceito SEM validação HMAC — configure MERCADO_PAGO_WEBHOOK_SECRET no Railway');
+      logger.warn('Webhook aceito SEM valida\u00e7\u00e3o HMAC \u2014 configure MERCADO_PAGO_WEBHOOK_SECRET no Railway');
     }
 
     const eventType = payload.type as string;
@@ -71,10 +68,11 @@ webhooksRouter.post(
 
     logger.info(`Webhook recebido: tipo=${eventType} | action=${action} | id=${dataId}`);
 
+    // Responde 200 imediatamente para o MP n\u00e3o retentar
     res.status(200).json({ status: 'received' });
 
     processWebhookAsync(eventType, dataId, payload).catch((error) => {
-      logger.error('Erro no processamento assíncrono do webhook:', error);
+      logger.error('Erro no processamento ass\u00edncrono do webhook:', error);
     });
   }
 );
@@ -94,52 +92,70 @@ async function processWebhookAsync(
     return;
   }
 
-  // FIX L5: checa status ANTES do upsert.
-  const existingEvent = await prisma.webhookEvent.findUnique({
-    where: {
-      provider_externalId_eventType: {
+  // FIX RACE: tenta criar o registro com status PROCESSING.
+  // Se j\u00e1 existir (unique constraint), o create falha e o update entra.
+  // O update s\u00f3 muda para PROCESSING se ainda estiver PENDING.
+  // Se j\u00e1 estiver PROCESSING/PROCESSED/IGNORED, o updateMany retorna count=0
+  // e abortamos \u2014 garantindo que apenas UM processo executa a entrega.
+  let webhookEventId: string;
+  try {
+    const created = await prisma.webhookEvent.create({
+      data: {
         provider: 'mercado_pago',
-        externalId,
         eventType,
+        externalId,
+        rawPayload: rawPayload as unknown as Prisma.InputJsonValue,
+        status: 'PROCESSING',
       },
-    },
-  });
+      select: { id: true },
+    });
+    webhookEventId = created.id;
+  } catch (createError: any) {
+    // Registro j\u00e1 existe (unique constraint) \u2014 tenta assumir o lock apenas se PENDING
+    const existing = await prisma.webhookEvent.findUnique({
+      where: {
+        provider_externalId_eventType: {
+          provider: 'mercado_pago',
+          externalId,
+          eventType,
+        },
+      },
+      select: { id: true, status: true },
+    });
 
-  if (existingEvent?.status === 'PROCESSED') {
-    logger.info(`Webhook já processado: ${externalId}. Ignorando.`);
-    return;
+    if (!existing) {
+      logger.warn(`Webhook ${externalId}: registro desapareceu ap\u00f3s conflito, abortando`);
+      return;
+    }
+
+    if (existing.status !== 'PENDING') {
+      logger.info(`Webhook ${externalId}: status=${existing.status}, j\u00e1 processado/ignorado. Ignorando.`);
+      return;
+    }
+
+    // Tenta fazer a transi\u00e7\u00e3o PENDING \u2192 PROCESSING atomicamente
+    const locked = await prisma.webhookEvent.updateMany({
+      where: { id: existing.id, status: 'PENDING' },
+      data: { status: 'PROCESSING' },
+    });
+
+    if (locked.count === 0) {
+      // Outro processo ganhou a corrida
+      logger.info(`Webhook ${externalId}: outro processo assumiu o lock, abortando`);
+      return;
+    }
+
+    webhookEventId = existing.id;
   }
 
-  if (existingEvent?.status === 'IGNORED') {
-    logger.info(`Webhook marcado como IGNORED anteriormente: ${externalId}. Pulando.`);
-    return;
-  }
-
-  const webhookEvent = await prisma.webhookEvent.upsert({
-    where: {
-      provider_externalId_eventType: {
-        provider: 'mercado_pago',
-        externalId,
-        eventType,
-      },
-    },
-    update: { status: 'PROCESSING' },
-    create: {
-      provider: 'mercado_pago',
-      eventType,
-      externalId,
-      rawPayload: rawPayload as unknown as Prisma.InputJsonValue,
-      status: 'PROCESSING',
-    },
-  });
-
+  // A partir daqui, apenas UM processo chega
   try {
     const mpPayment = await mercadoPagoService.getPaymentById(externalId);
 
     if (mpPayment.status !== APPROVED_STATUS) {
       logger.info(`Webhook: pagamento ${externalId} com status ${mpPayment.status}. Ignorando.`);
       await prisma.webhookEvent.update({
-        where: { id: webhookEvent.id },
+        where: { id: webhookEventId },
         data: { status: 'IGNORED', processedAt: new Date() },
       });
       return;
@@ -150,23 +166,23 @@ async function processWebhookAsync(
       await prisma.payment.findUnique({ where: { id: mpPayment.external_reference } });
 
     if (!internalPayment) {
-      logger.error(`Webhook: pagamento interno não encontrado para MP ID ${externalId}`);
+      logger.error(`Webhook: pagamento interno n\u00e3o encontrado para MP ID ${externalId}`);
       await prisma.webhookEvent.update({
-        where: { id: webhookEvent.id },
-        data: { status: 'FAILED', error: 'Pagamento interno não encontrado', processedAt: new Date() },
+        where: { id: webhookEventId },
+        data: { status: 'FAILED', error: 'Pagamento interno n\u00e3o encontrado', processedAt: new Date() },
       });
       return;
     }
 
     await prisma.webhookEvent.update({
-      where: { id: webhookEvent.id },
+      where: { id: webhookEventId },
       data: { paymentId: internalPayment.id },
     });
 
     await paymentService.processApprovedPayment(internalPayment.id);
 
     await prisma.webhookEvent.update({
-      where: { id: webhookEvent.id },
+      where: { id: webhookEventId },
       data: { status: 'PROCESSED', processedAt: new Date() },
     });
 
@@ -176,7 +192,7 @@ async function processWebhookAsync(
     const errorMsg = error instanceof Error ? error.message : 'Erro desconhecido';
     logger.error(`Erro ao processar webhook ${externalId}:`, error);
     await prisma.webhookEvent.update({
-      where: { id: webhookEvent.id },
+      where: { id: webhookEventId },
       data: { status: 'FAILED', error: errorMsg, processedAt: new Date() },
     }).catch(() => {});
   }
