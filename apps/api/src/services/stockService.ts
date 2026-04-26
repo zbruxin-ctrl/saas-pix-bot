@@ -1,5 +1,6 @@
-// ALTERAÇÕES: logs com IDs de correlação completos em todos os métodos
-// (productId, paymentId, telegramUserId, itemId, orderId)
+// ALTERAÇÕES:
+// - releaseExpiredReservations: usa updateMany direto com filtro de data (sem carregar IDs em memória)
+// - getAvailableStock: query simplificada com _count agregado (menos roundtrips)
 import { StockItemStatus, StockReservationStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -11,27 +12,33 @@ export class StockService {
   async getAvailableStock(productId: string): Promise<number | null> {
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { stock: true },
+      select: {
+        stock: true,
+        _count: { select: { stockItems: true } },
+      },
     });
     if (!product) return 0;
-    if (product.stock === null) return null;
+    if (product.stock === null && product._count.stockItems === 0) return null;
 
-    const hasItems = await prisma.stockItem.count({ where: { productId } });
-    if (hasItems > 0) {
+    if (product._count.stockItems > 0) {
       const available = await prisma.stockItem.count({
         where: { productId, status: StockItemStatus.AVAILABLE },
       });
       return available;
     }
 
-    const reserved = await prisma.stockReservation.count({
-      where: {
-        productId,
-        status: StockReservationStatus.ACTIVE,
-        expiresAt: { gt: new Date() },
-      },
-    });
-    return Math.max(0, product.stock - reserved);
+    if (product.stock !== null) {
+      const reserved = await prisma.stockReservation.count({
+        where: {
+          productId,
+          status: StockReservationStatus.ACTIVE,
+          expiresAt: { gt: new Date() },
+        },
+      });
+      return Math.max(0, product.stock - reserved);
+    }
+
+    return null;
   }
 
   async reserveStock(
@@ -41,13 +48,13 @@ export class StockService {
   ): Promise<void> {
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { stock: true },
+      select: { stock: true, _count: { select: { stockItems: true } } },
     });
     if (!product) throw new Error('Produto não encontrado.');
 
-    const hasItems = await prisma.stockItem.count({ where: { productId } });
+    const hasItems = product._count.stockItems > 0;
 
-    if (hasItems > 0) {
+    if (hasItems) {
       await prisma.$transaction(async (tx) => {
         const item = await tx.stockItem.findFirst({
           where: { productId, status: StockItemStatus.AVAILABLE },
@@ -190,25 +197,23 @@ export class StockService {
     return item?.content ?? null;
   }
 
+  // FIX: usa updateMany direto com filtro de data — sem carregar IDs em memória
   async releaseExpiredReservations(): Promise<number> {
     const cutoff = new Date(Date.now() - RESERVATION_TTL_MS);
-    const expiredItems = await prisma.stockItem.findMany({
+
+    const itemsResult = await prisma.stockItem.updateMany({
       where: { status: StockItemStatus.RESERVED, reservedAt: { lt: cutoff } },
-      select: { id: true },
+      data: {
+        status: StockItemStatus.AVAILABLE,
+        paymentId: null,
+        reservedAt: null,
+        releasedAt: new Date(),
+      },
     });
 
-    if (expiredItems.length > 0) {
-      await prisma.stockItem.updateMany({
-        where: { id: { in: expiredItems.map((i) => i.id) } },
-        data: {
-          status: StockItemStatus.AVAILABLE,
-          paymentId: null,
-          reservedAt: null,
-          releasedAt: new Date(),
-        },
-      });
+    if (itemsResult.count > 0) {
       logger.info(
-        `[StockService] ${expiredItems.length} StockItems expirados liberados (FIFO)`
+        `[StockService] ${itemsResult.count} StockItems expirados liberados (FIFO)`
       );
     }
 
@@ -222,7 +227,7 @@ export class StockService {
       );
     }
 
-    return expiredItems.length + legacyResult.count;
+    return itemsResult.count + legacyResult.count;
   }
 }
 
