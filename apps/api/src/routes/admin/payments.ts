@@ -89,7 +89,12 @@ adminPaymentsRouter.get('/:id', async (req: Request, res: Response) => {
       product: true,
       telegramUser: true,
       order: {
-        include: { deliveryLogs: { orderBy: { createdAt: 'asc' } } },
+        include: {
+          deliveryLogs: { orderBy: { createdAt: 'asc' } },
+          stockReservation: {
+            include: { stockItem: { select: { content: true, status: true } } },
+          },
+        },
       },
       webhookEvents: { orderBy: { createdAt: 'desc' } },
     },
