@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// API_URL é server-side only. Configure no Vercel em:
+// Settings → Environment Variables → API_URL = https://api-production-a596.up.railway.app
+const API_URL =
+  process.env.API_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  'https://api-production-a596.up.railway.app';
 
 async function proxyRequest(request: NextRequest, method: string): Promise<NextResponse> {
   const url = request.nextUrl;
@@ -14,13 +19,11 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
     'Content-Type': request.headers.get('content-type') || 'application/json',
   };
 
-  // Envia o token como Bearer — o middleware do Railway (auth.ts)
-  // aceita tanto cookie quanto Authorization: Bearer
+  // Envia o token como Bearer — o middleware da API aceita cookie e Authorization: Bearer
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  // Repassa headers úteis
   const forwarded = request.headers.get('x-forwarded-for');
   if (forwarded) headers['x-forwarded-for'] = forwarded;
 
@@ -28,8 +31,6 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
   if (!['GET', 'HEAD', 'DELETE'].includes(method)) {
     const contentType = request.headers.get('content-type') || '';
     if (contentType.includes('multipart/form-data')) {
-      // Repassa form-data sem re-serializar; remove Content-Type para
-      // deixar o fetch definir o boundary correto
       body = await request.formData();
       delete headers['Content-Type'];
     } else {
@@ -47,13 +48,12 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
       statusText: apiRes.statusText,
     });
 
-    // Repassa Content-Type da resposta
     const ct = apiRes.headers.get('content-type');
     if (ct) response.headers.set('content-type', ct);
 
     return response;
   } catch (error) {
-    console.error('[proxy] fetch error:', error);
+    console.error('[proxy] fetch error:', targetUrl, error);
     return NextResponse.json(
       { success: false, error: 'Erro de conexão com a API' },
       { status: 503 }
