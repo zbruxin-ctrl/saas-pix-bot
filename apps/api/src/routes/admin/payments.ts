@@ -1,15 +1,11 @@
 // routes/admin/payments.ts
-// FIX B2: remove Promise.all no GET /:id para respeitar connection_limit=1 do Neon free
-// FIX B1: remove cast (prisma.stockItem as any) — usa findUnique tipado com try/catch
-// FIX S4: requireRole adicionado em todas as rotas
-// REPROCESS: POST /:id/reprocess — consulta o MP e força aprovação se payment_status=approved
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { requireRole } from '../../middleware/auth';
 import { paymentService } from '../../services/paymentService';
-import axios from 'axios';
+import { mercadoPagoService } from '../../services/mercadoPagoService';
 
 export const adminPaymentsRouter = Router();
 
@@ -156,8 +152,8 @@ adminPaymentsRouter.get(
 );
 
 // POST /api/admin/payments/:id/reprocess
-// Consulta o Mercado Pago pelo mercadoPagoId e, se aprovado lá,
-// chama processApprovedPayment para forçar aprovação + entrega.
+// Consulta o MP via mercadoPagoService (token já configurado no env)
+// e força processApprovedPayment se o MP confirmar aprovação.
 adminPaymentsRouter.post(
   '/:id/reprocess',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -173,6 +169,12 @@ adminPaymentsRouter.post(
       return;
     }
 
+    // Se já aprovado no nosso banco, não reprocessa
+    if (payment.status === 'APPROVED') {
+      res.json({ success: true, message: 'Pagamento já está aprovado', alreadyApproved: true });
+      return;
+    }
+
     if (!payment.mercadoPagoId) {
       res.status(400).json({
         success: false,
@@ -181,45 +183,28 @@ adminPaymentsRouter.post(
       return;
     }
 
-    if (payment.status === 'APPROVED') {
-      res.json({ success: true, message: 'Pagamento já está aprovado', alreadyApproved: true });
-      return;
-    }
-
-    // Consulta o MP para confirmar que foi pago
-    const mpToken = process.env.MP_ACCESS_TOKEN;
-    if (!mpToken) {
-      res.status(500).json({ success: false, error: 'MP_ACCESS_TOKEN não configurado no servidor' });
-      return;
-    }
-
-    let mpData: any;
+    // Consulta o status real no Mercado Pago
+    let mpDetail: Awaited<ReturnType<typeof mercadoPagoService.getPaymentById>>;
     try {
-      const mpRes = await axios.get(
-        `https://api.mercadopago.com/v1/payments/${payment.mercadoPagoId}`,
-        { headers: { Authorization: `Bearer ${mpToken}` } }
-      );
-      mpData = mpRes.data;
+      mpDetail = await mercadoPagoService.getPaymentById(payment.mercadoPagoId);
     } catch (err: any) {
-      const httpStatus = err?.response?.status;
-      const message = err?.response?.data?.message || err.message;
       res.status(502).json({
         success: false,
-        error: `Erro ao consultar Mercado Pago (${httpStatus}): ${message}`,
+        error: `Erro ao consultar Mercado Pago: ${err?.message || 'erro desconhecido'}`,
       });
       return;
     }
 
-    if (mpData.status !== 'approved') {
+    if (mpDetail.status !== 'approved') {
       res.json({
         success: false,
-        mpStatus: mpData.status,
-        error: `O Mercado Pago retornou status "${mpData.status}" — pagamento ainda não aprovado no MP`,
+        mpStatus: mpDetail.status,
+        error: `O Mercado Pago retornou status "${mpDetail.status}" — pagamento ainda não aprovado no MP`,
       });
       return;
     }
 
-    // Pagamento aprovado no MP mas não processado — dispara o fluxo completo
+    // MP confirmou aprovação → dispara o fluxo completo de entrega
     try {
       await paymentService.processApprovedPayment(paymentId);
     } catch (err: any) {
