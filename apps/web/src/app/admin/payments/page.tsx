@@ -9,11 +9,11 @@ import type { PaymentDTO, PaginatedResponse } from '@saas-pix/shared';
 
 const STATUS_OPTIONS = [
   { value: '', label: 'Todos os status' },
-  { value: 'APPROVED', label: '\u2705 Aprovado' },
-  { value: 'PENDING', label: '\u23f3 Pendente' },
-  { value: 'REJECTED', label: '\u274c Rejeitado' },
-  { value: 'CANCELLED', label: '\ud83d\udeab Cancelado' },
-  { value: 'EXPIRED', label: '\u231b Expirado' },
+  { value: 'APPROVED', label: '✅ Aprovado' },
+  { value: 'PENDING', label: '⏳ Pendente' },
+  { value: 'REJECTED', label: '❌ Rejeitado' },
+  { value: 'CANCELLED', label: '🚫 Cancelado' },
+  { value: 'EXPIRED', label: '⌛ Expirado' },
 ];
 
 export default function PaymentsPage() {
@@ -77,12 +77,12 @@ export default function PaymentsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="text-left px-4 py-3 font-semibold text-gray-600">Usu\u00e1rio</th>
+                <th className="text-left px-4 py-3 font-semibold text-gray-600">Usuário</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600">Produto</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600">Valor</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600">Data</th>
-                <th className="text-left px-4 py-3 font-semibold text-gray-600">A\u00e7\u00e3o</th>
+                <th className="text-left px-4 py-3 font-semibold text-gray-600">Ação</th>
               </tr>
             </thead>
             <tbody>
@@ -92,18 +92,18 @@ export default function PaymentsPage() {
                     <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto" />
                   </td>
                 </tr>
-              ) : result?.items.length === 0 ? (
+              ) : result?.data.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="text-center py-12 text-gray-400">
                     Nenhum pagamento encontrado
                   </td>
                 </tr>
               ) : (
-                result?.items.map((p) => (
+                result?.data.map((p) => (
                   <tr key={p.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="font-medium text-gray-900">
-                        {p.telegramUser?.firstName || p.telegramUser?.username || '\u2014'}
+                        {p.telegramUser?.firstName || p.telegramUser?.username || '—'}
                       </div>
                       <div className="text-gray-400 text-xs">ID: {p.telegramUser?.telegramId}</div>
                     </td>
@@ -122,7 +122,7 @@ export default function PaymentsPage() {
                         onClick={() => router.push(`/admin/payments/${p.id}`)}
                         className="text-blue-600 hover:text-blue-700 font-medium text-xs"
                       >
-                        Ver detalhes \u2192
+                        Ver detalhes →
                       </button>
                     </td>
                   </tr>
@@ -132,11 +132,11 @@ export default function PaymentsPage() {
           </table>
         </div>
 
-        {/* Pagina\u00e7\u00e3o */}
+        {/* Paginação */}
         {result && result.totalPages > 1 && (
           <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between">
             <span className="text-sm text-gray-500">
-              P\u00e1gina {result.page} de {result.totalPages}
+              Página {result.page} de {result.totalPages}
             </span>
             <div className="flex gap-2">
               <button
@@ -144,14 +144,14 @@ export default function PaymentsPage() {
                 disabled={page === 1}
                 className="btn-secondary text-sm py-1 px-3 disabled:opacity-40"
               >
-                \u2190 Anterior
+                ← Anterior
               </button>
               <button
                 onClick={() => setPage((p) => Math.min(result.totalPages, p + 1))}
                 disabled={page === result.totalPages}
                 className="btn-secondary text-sm py-1 px-3 disabled:opacity-40"
               >
-                Pr\u00f3xima \u2192
+                Próxima →
               </button>
             </div>
           </div>
