@@ -11,7 +11,6 @@ import { AppError } from '../middleware/errorHandler';
 import type { CreatePaymentRequest, CreatePaymentResponse } from '@saas-pix/shared';
 
 export class PaymentService {
-
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username } = data;
 
@@ -62,7 +61,7 @@ export class PaymentService {
       },
     });
 
-    if (product.stock !== null || await this.productHasStockItems(productId)) {
+    if (product.stock !== null || (await this.productHasStockItems(productId))) {
       try {
         await stockService.reserveStock(productId, telegramUser.id, payment.id);
       } catch (err) {
@@ -81,10 +80,12 @@ export class PaymentService {
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
       });
 
-      const raw = mpPayment.date_of_expiration;
-      const pixExpiresAt = new Date(
-        raw.includes('+') || raw.endsWith('Z') ? raw : raw + '-03:00'
-      );
+      const raw = (mpPayment as { date_of_expiration?: string }).date_of_expiration;
+      let pixExpiresAt = raw ? new Date(raw) : new Date(Date.now() + 30 * 60 * 1000);
+
+      if (Number.isNaN(pixExpiresAt.getTime())) {
+        pixExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      }
 
       const updatedPayment = await prisma.payment.update({
         where: { id: payment.id },
