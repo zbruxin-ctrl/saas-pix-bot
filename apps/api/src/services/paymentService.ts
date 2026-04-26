@@ -176,7 +176,7 @@ export class PaymentService {
       where: { id: paymentId },
       include: { telegramUser: true },
     });
-
+  }
     if (!payment || payment.status !== PaymentStatus.PENDING) return;
 
     await prisma.payment.update({
