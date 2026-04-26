@@ -94,9 +94,9 @@ export async function deleteProduct(id: string): Promise<void> {
 // ─── Product Medias (usado em products-client.tsx) ────────────────────────────
 
 /**
- * Retorna as mídias extras de um produto (rota: GET /admin/products/:id/medias-config).
- * Nota: as mídias de ENTREGA ficam em orders/:orderId/medias.
- * Aqui usamos a rota de config do produto para exibir/editar no painel.
+ * Retorna as mídias de configuração de um produto.
+ * Rota: GET /admin/products/:id/medias-config
+ * As mídias ficam em product.metadata.medias (sem tabela própria).
  */
 export async function getProductMedias(productId: string): Promise<ProductMedia[]> {
   try {
@@ -105,34 +105,29 @@ export async function getProductMedias(productId: string): Promise<ProductMedia[
     );
     return res.data.data ?? [];
   } catch {
-    // Endpoint ainda não implementado na API → retorna array vazio sem quebrar a UI
     return [];
   }
 }
 
 /**
- * Salva (substitui) as mídias extras de um produto junto com o payload do produto.
- * Faz PUT no produto e POST nas mídias em sequência.
+ * Sincroniza APENAS as mídias de configuração do produto.
+ * O salvamento dos dados do produto deve ser feito separadamente via updateProduct().
+ * Rota: PUT /admin/products/:id/medias-config
  */
 export async function updateProductMedias(
   productId: string,
-  medias: ProductMedia[],
-  productPayload: Partial<ProductDTO>
+  medias: ProductMedia[]
 ): Promise<void> {
-  // Atualiza os dados do produto
-  await api.put(`/admin/products/${productId}`, productPayload);
-
-  // Sincroniza mídias (ignora silenciosamente se a rota ainda não existir)
   try {
     await api.put(`/admin/products/${productId}/medias-config`, { medias });
   } catch {
-    // Endpoint ainda não implementado → não bloqueia o fluxo de salvamento
+    // Não bloqueia o fluxo de salvamento se a rota não estiver disponível
   }
 }
 
 /**
- * Faz upload de um arquivo de mídia para o storage e retorna a URL pública.
- * Endpoint esperado: POST /api/proxy/admin/upload com multipart/form-data.
+ * Faz upload de um arquivo de mídia e retorna a URL pública.
+ * Endpoint: POST /api/proxy/admin/upload (multipart/form-data).
  */
 export async function uploadMediaFile(
   file: File,
