@@ -83,18 +83,18 @@ export class PaymentService {
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
       });
 
+      const raw = mpPayment.date_of_expiration;
+      const pixExpiresAt = new Date(
+        raw.includes('+') || raw.endsWith('Z') ? raw : raw + '-03:00'
+      );
+      
       const updatedPayment = await prisma.payment.update({
         where: { id: payment.id },
         data: {
           mercadoPagoId: String(mpPayment.id),
           pixQrCode: mpPayment.point_of_interaction.transaction_data.qr_code_base64,
           pixQrCodeText: mpPayment.point_of_interaction.transaction_data.qr_code,
-          pixExpiresAt: (() => {
-            // MP retorna sem 'Z' mas no horário local do servidor — força interpretação correta
-            const raw = mpPayment.date_of_expiration;
-            // Se já tem offset (+00:00 ou Z), usa direto; senão assume UTC e ajusta
-            return new Date(raw.includes('+') || raw.endsWith('Z') ? raw : raw + '-03:00');
-          })(),
+          pixExpiresAt,
           status: PaymentStatus.PENDING,
         },
       });
