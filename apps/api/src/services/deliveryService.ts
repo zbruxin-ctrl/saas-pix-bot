@@ -1,8 +1,9 @@
 // deliveryService.ts
 // FEAT: mensagem de confirmaçao customizável via product.metadata.confirmationMessage
 //       Variáveis: {{produto}}, {{conteudo}}
-// FIX:  primeira mídia é enviada com a mensagem como caption (acoplada);
-//       mídias adicionais são enviadas em sequência após.
+// FIX:  primeira mídia é enviada com a mensagem como caption (acoplada).
+//       Se a mensagem ultrapassar 1024 chars (limite do Telegram),
+//       envia o texto separado primeiro e depois as mídias normalmente.
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -12,6 +13,9 @@ import { logger } from '../lib/logger';
 const MAX_RETRIES = 3;
 const BASE_RETRY_MS = 3000;
 const MAX_RETRY_MS = 15000;
+
+/** Limite de caption do Telegram */
+const TELEGRAM_CAPTION_LIMIT = 1024;
 
 type MediaEntry = {
   url: string;
@@ -50,9 +54,10 @@ function buildConfirmationMessage(
 }
 
 /**
- * Envia a mensagem de entrega acoplada à primeira mídia (como caption).
+ * Envia a mensagem acoplada à primeira mídia como caption.
+ * Fallback: se a mensagem ultrapassar 1024 chars, envia o texto primeiro
+ * e depois as mídias sem caption (para não perder nenhuma informação).
  * Se não houver mídias, envia como texto puro.
- * Mídias adicionais são enviadas em sequência com suas próprias captions.
  */
 async function sendMessageWithMedias(
   telegramId: string,
@@ -66,11 +71,24 @@ async function sendMessageWithMedias(
     return;
   }
 
+  const messageTooBig = message.length > TELEGRAM_CAPTION_LIMIT;
+
+  if (messageTooBig) {
+    // Fallback: texto separado + mídias sem caption de mensagem
+    logger.warn(
+      `Mensagem de entrega (${message.length} chars) ultrapassa limite de caption do Telegram (${TELEGRAM_CAPTION_LIMIT}). Enviando separado.`
+    );
+    await telegramService.sendMessage(telegramId, message);
+    for (const media of validMedias) {
+      await sendMedia(telegramId, media);
+    }
+    return;
+  }
+
+  // Caminho normal: primeira mídia com a mensagem como caption
   const [first, ...rest] = validMedias;
-  // Primeira mídia recebe a mensagem como caption
   await sendMedia(telegramId, first, message);
 
-  // Mídias extras com suas próprias captions
   for (const media of rest) {
     await sendMedia(telegramId, media);
   }
@@ -88,7 +106,6 @@ async function sendMedia(
     } else if (media.mediaType === 'IMAGE') {
       await telegramService.sendPhoto(telegramId, media.url, caption);
     } else {
-      // FILE: envia como link + caption no texto
       const msg = caption ? `${caption}\n📎 ${media.url}` : `📎 ${media.url}`;
       await telegramService.sendMessage(telegramId, msg);
     }
@@ -98,14 +115,12 @@ async function sendMedia(
   }
 }
 
-/** Coleta as mídias do produto salvas em metadata.medias */
 function getProductMedias(product: Product): MediaEntry[] {
   const meta = product.metadata as Record<string, unknown> | null;
   if (!meta?.medias || !Array.isArray(meta.medias)) return [];
   return meta.medias as MediaEntry[];
 }
 
-/** Coleta as mídias do pedido da tabela DeliveryMedia */
 async function getOrderMedias(orderId: string): Promise<MediaEntry[]> {
   const rows = await prisma.deliveryMedia.findMany({
     where: { orderId },
@@ -230,13 +245,8 @@ class DeliveryService {
           mediaType: isVideo ? 'VIDEO' : 'IMAGE',
         };
 
-        // Mídia principal com a mensagem de confirmação acoplada como caption
-        await sendMedia(telegramId, mainMedia, confirmMsg);
-
-        // Mídias extras
-        for (const media of allMedias) {
-          await sendMedia(telegramId, media);
-        }
+        // Usa sendMessageWithMedias para ter o mesmo fallback automático
+        await sendMessageWithMedias(telegramId, confirmMsg, [mainMedia, ...allMedias]);
         break;
       }
 
