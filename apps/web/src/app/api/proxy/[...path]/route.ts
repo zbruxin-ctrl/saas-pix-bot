@@ -1,62 +1,70 @@
-// apps/web/src/app/api/proxy/[...path]/route.ts
-// Proxy genérico: encaminha todas as chamadas /api/proxy/* para o Railway
-// com o cookie auth_token, resolvendo o problema de cookies cross-domain.
-
 import { NextRequest, NextResponse } from 'next/server';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_URL = (process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
+const ADMIN_ORIGIN = process.env.NEXT_PUBLIC_APP_URL || 'https://saas-pix-bot.vercel.app'; // ← ADD
+
 
 async function handler(
   request: NextRequest,
   { params }: { params: { path: string[] } }
 ) {
+  if (!API_URL) {
+    console.error('[PROXY] API_URL não configurada!');
+    return NextResponse.json({ error: 'API_URL não configurada no servidor' }, { status: 500 });
+  }
+
   const path = params.path.join('/');
-  const url = new URL(request.url);
-  const targetUrl = `${API_URL}/api/${path}${url.search}`;
+  const search = request.nextUrl.search;
+  const url = `${API_URL}/api/${path}${search}`;
 
-  // Pega o cookie auth_token do browser e repassa para o Railway
-  const authToken = request.cookies.get('auth_token')?.value;
-  const cookieHeader = authToken ? `auth_token=${authToken}` : '';
+  console.log('[PROXY]', request.method, url);
 
-  const origin = request.headers.get('origin') ||
-    'https://saas-pix-bot.vercel.app';
+  try {
+    const cookieHeader = request.headers.get('cookie') || '';
 
-  const headers: Record<string, string> = {
-    'Content-Type': request.headers.get('content-type') || 'application/json',
-    'Origin': origin.startsWith('http') ? origin : `https://${origin}`,
-  };
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Cookie': cookieHeader,
+      'Origin': ADMIN_ORIGIN, // ← ADD
+    };
 
-  if (cookieHeader) {
-    headers['Cookie'] = cookieHeader;
+    const auth = request.headers.get('authorization');
+    if (auth) headers['Authorization'] = auth;
+
+    const init: RequestInit = {
+      method: request.method,
+      headers,
+    };
+
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      init.body = await request.text();
+    }
+
+    const apiRes = await fetch(url, init);
+    const data = await apiRes.text();
+
+    console.log('[PROXY] status:', apiRes.status, url);
+
+    const response = new NextResponse(data, {
+      status: apiRes.status,
+      headers: {
+        'Content-Type': apiRes.headers.get('Content-Type') || 'application/json',
+      },
+    });
+
+    const setCookie = apiRes.headers.get('set-cookie');
+    if (setCookie) {
+      response.headers.set('set-cookie', setCookie);
+    }
+
+    return response;
+  } catch (err) {
+    console.error('[PROXY] erro ao chamar API:', err);
+    return NextResponse.json(
+      { error: 'Falha ao conectar com a API', detail: String(err) },
+      { status: 502 }
+    );
   }
-
-  let body: string | undefined;
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    body = await request.text();
-  }
-
-  const apiRes = await fetch(targetUrl, {
-    method: request.method,
-    headers,
-    body,
-  });
-
-  const data = await apiRes.text();
-
-  const response = new NextResponse(data, {
-    status: apiRes.status,
-    headers: {
-      'Content-Type': apiRes.headers.get('content-type') || 'application/json',
-    },
-  });
-
-  // Encaminha Set-Cookie da API (ex: logout limpa o cookie)
-  const setCookie = apiRes.headers.get('set-cookie');
-  if (setCookie) {
-    response.headers.set('set-cookie', setCookie);
-  }
-
-  return response;
 }
 
 export const GET = handler;

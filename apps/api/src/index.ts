@@ -32,9 +32,8 @@ const fixedOrigins = env.NODE_ENV === 'development'
 // Função que valida origem dinamicamente
 // Aceita origens fixas + qualquer subdomínio *.vercel.app (previews e deployments)
 function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return false;
+  if (!origin) return true; // server-to-server: proxy não envia Origin
   if (fixedOrigins.includes(origin)) return true;
-  // Aceita qualquer deployment/preview do Vercel do mesmo projeto
   if (origin.endsWith('.vercel.app')) return true;
   return false;
 }
@@ -42,7 +41,7 @@ function isOriginAllowed(origin: string | undefined): boolean {
 app.use(cors({
   origin: (origin, callback) => {
     if (isOriginAllowed(origin)) {
-      callback(null, origin); // reflete a origin exata (obrigatório com credentials)
+      callback(null, origin ?? '*'); // reflete a origin exata (obrigatório com credentials)
     } else {
       callback(new Error(`CORS: origem não permitida: ${origin}`));
     }

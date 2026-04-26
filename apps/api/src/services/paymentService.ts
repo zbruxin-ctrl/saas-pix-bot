@@ -1,4 +1,4 @@
-// Serviço de pagamentos - lógica de negócio principal
+// paymentService.ts — cria pagamentos PIX com reserva FIFO via StockItem
 import { PaymentStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -12,19 +12,14 @@ import type { CreatePaymentRequest, CreatePaymentResponse } from '@saas-pix/shar
 
 export class PaymentService {
 
-  // Cria ou busca usuário Telegram, depois cria pagamento PIX com reserva de estoque
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username } = data;
 
     const product = await prisma.product.findUnique({
       where: { id: productId, isActive: true },
     });
+    if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
 
-    if (!product) {
-      throw new AppError('Produto não encontrado ou indisponível.', 404);
-    }
-
-    // Verifica estoque disponível (descontando reservas ativas)
     const available = await stockService.getAvailableStock(productId);
     if (available !== null && available <= 0) {
       throw new AppError('Produto esgotado no momento. Tente novamente em alguns minutos.', 409);
@@ -58,7 +53,6 @@ export class PaymentService {
       };
     }
 
-    // Cria pagamento no banco primeiro
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
@@ -69,8 +63,8 @@ export class PaymentService {
       },
     });
 
-    // Reserva estoque imediatamente (antes de ir ao MP)
-    if (product.stock !== null) {
+    // Reserva estoque (FIFO via StockItem se disponível, fallback legado)
+    if (product.stock !== null || await this.productHasStockItems(productId)) {
       try {
         await stockService.reserveStock(productId, telegramUser.id, payment.id);
       } catch (err) {
@@ -111,14 +105,17 @@ export class PaymentService {
         productName: product.name,
       };
     } catch (error) {
-      // Reverte: remove pagamento e libera reserva
       await stockService.releaseReservation(payment.id, 'falha_criacao_mp');
       await prisma.payment.delete({ where: { id: payment.id } });
       throw error;
     }
   }
 
-  // Processa pagamento aprovado (chamado pelo webhook)
+  private async productHasStockItems(productId: string): Promise<boolean> {
+    const count = await prisma.stockItem.count({ where: { productId } });
+    return count > 0;
+  }
+
   async processApprovedPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
@@ -165,9 +162,7 @@ export class PaymentService {
       return newOrder;
     });
 
-    // Confirma reserva e decrementa estoque definitivamente
     await stockService.confirmReservation(paymentId);
-
     await deliveryService.deliver(order.id, payment.telegramUser, payment.product);
     await telegramService.sendPaymentConfirmation(
       payment.telegramUser.telegramId,
@@ -176,7 +171,6 @@ export class PaymentService {
     );
   }
 
-  // Cancela pagamento expirado e libera estoque
   async cancelExpiredPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
@@ -187,17 +181,12 @@ export class PaymentService {
 
     await prisma.payment.update({
       where: { id: paymentId },
-      data: {
-        status: PaymentStatus.EXPIRED,
-        cancelledAt: new Date(),
-      },
+      data: { status: PaymentStatus.EXPIRED, cancelledAt: new Date() },
     });
 
     await stockService.releaseReservation(paymentId, 'pagamento_expirado');
-
     logger.info(`Pagamento ${paymentId} marcado como EXPIRADO e estoque liberado`);
 
-    // Notifica o usuário no Telegram
     try {
       await telegramService.sendMessage(
         payment.telegramUser.telegramId,
@@ -213,9 +202,7 @@ export class PaymentService {
       where: { id: paymentId },
       select: { id: true, status: true },
     });
-
     if (!payment) throw new AppError('Pagamento não encontrado', 404);
-
     return { status: payment.status, paymentId: payment.id };
   }
 }

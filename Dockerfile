@@ -1,16 +1,10 @@
 FROM node:20-alpine
 RUN apk add --no-cache openssl
 WORKDIR /app
-COPY package*.json ./
-COPY packages/*/package*.json ./packages/
-COPY apps/*/package*.json ./apps/
+COPY . .
 RUN npm install
-COPY packages ./packages
-COPY apps ./apps
-COPY prisma ./prisma
-COPY tsconfig.json ./
-RUN npx prisma generate --schema=./prisma/schema.prisma
 RUN npm run build -w packages/shared
+RUN npx prisma generate --schema=./prisma/schema.prisma
 RUN npm run build -w apps/api
 EXPOSE 3001
-CMD ["node", "apps/api/dist/index.js"]
+CMD npx prisma migrate deploy --schema=./prisma/schema.prisma && node apps/api/dist/index.js

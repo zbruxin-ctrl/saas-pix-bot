@@ -1,8 +1,9 @@
-// Serviço de entrega — entrega produto após pagamento confirmado
-// Suporta os tipos: TEXT | LINK | FILE_MEDIA | ACCOUNT
+// deliveryService.ts — entrega produto com proteção contra duplicidade
+// Usa StockItem.content como conteúdo prioritário para entrega FIFO
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
+import { stockService } from './stockService';
 import { logger } from '../lib/logger';
 
 const MAX_RETRIES = 3;
@@ -11,7 +12,18 @@ const RETRY_DELAY_MS = 5000;
 class DeliveryService {
 
   async deliver(orderId: string, telegramUser: TelegramUser, product: Product): Promise<void> {
+    // Proteção contra duplicidade: se já entregue, loga e sai sem reenviar
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new Error(`Pedido ${orderId} não encontrado`);
+    if (order.status === 'DELIVERED') {
+      logger.warn(`Pedido ${orderId} já entregue — ignorando tentativa duplicada`);
+      return;
+    }
+
     logger.info(`Iniciando entrega do pedido ${orderId}`);
+
+    // Conteúdo FIFO: usa o conteúdo da unidade reservada, se existir
+    const itemContent = await stockService.getReservedItemContent(order.paymentId);
 
     let attempt = 0;
     let lastError: string | null = null;
@@ -19,7 +31,7 @@ class DeliveryService {
     while (attempt < MAX_RETRIES) {
       attempt++;
       try {
-        await this.executeDelivery(telegramUser.telegramId, product, orderId);
+        await this.executeDelivery(telegramUser.telegramId, product, orderId, itemContent);
 
         await prisma.$transaction([
           prisma.order.update({
@@ -35,6 +47,9 @@ class DeliveryService {
             },
           }),
         ]);
+
+        // Marca unidade como entregue no StockItem
+        await stockService.markDelivered(order.paymentId, orderId);
 
         logger.info(`Pedido ${orderId} entregue com sucesso na tentativa ${attempt}`);
         return;
@@ -66,29 +81,33 @@ class DeliveryService {
     }
   }
 
-  private async executeDelivery(telegramId: string, product: Product, orderId: string): Promise<void> {
+  private async executeDelivery(
+    telegramId: string,
+    product: Product,
+    orderId: string,
+    itemContent: string | null
+  ): Promise<void> {
+    // itemContent substitui deliveryContent quando presente (FIFO por unidade)
+    const content = itemContent ?? product.deliveryContent;
+
     switch (product.deliveryType) {
       case DeliveryType.TEXT:
-        await this.deliverText(telegramId, product.deliveryContent, product.name);
+        await this.deliverText(telegramId, content, product.name);
         break;
-
       case DeliveryType.LINK:
-        await this.deliverLink(telegramId, product.deliveryContent, product.name);
+        await this.deliverLink(telegramId, content, product.name);
         break;
-
       case DeliveryType.FILE_MEDIA:
-        await this.deliverFileMedia(telegramId, product.deliveryContent, product.name);
+        await this.deliverFileMedia(telegramId, content, product.name);
         break;
-
       case DeliveryType.ACCOUNT:
-        await this.deliverAccount(telegramId, product.deliveryContent, product.name);
+        await this.deliverAccount(telegramId, content, product.name);
         break;
-
       default:
         throw new Error(`Tipo de entrega desconhecido: ${product.deliveryType}`);
     }
 
-    // Envia mídias extras anexadas ao pedido (se existirem)
+    await this.sendProductMedias(telegramId, product);
     await this.sendOrderMedias(telegramId, orderId);
   }
 
@@ -107,23 +126,20 @@ class DeliveryService {
   }
 
   private async deliverFileMedia(telegramId: string, url: string, productName: string): Promise<void> {
-    // Envia mensagem de confirmação primeiro
     const message =
       `🎉 *Pagamento confirmado!*\n\n` +
       `📦 *Produto:* ${productName}\n\n` +
       `📎 Seu conteúdo está disponível abaixo:`;
     await telegramService.sendMessage(telegramId, message);
 
-    // Detecta se é vídeo ou imagem pela extensão da URL
-    const isVideo = /\.(mp4|mov|avi|mkv|webm)(\?|$)/i.test(url) ||
-                    url.includes('youtube.com') ||
-                    url.includes('youtu.be');
+    const isVideo =
+      /\.(mp4|mov|avi|mkv|webm)(\?|$)/i.test(url) ||
+      url.includes('youtube.com') ||
+      url.includes('youtu.be');
 
     if (isVideo) {
-      // Envia como vídeo (Telegram faz player embutido para links diretos de MP4)
       await telegramService.sendVideo(telegramId, url);
     } else {
-      // Envia como foto/documento
       await telegramService.sendPhoto(telegramId, url);
     }
   }
@@ -147,7 +163,34 @@ class DeliveryService {
     await telegramService.sendMessage(telegramId, message);
   }
 
-  // Envia mídias extras anexadas ao pedido no painel admin
+  private async sendProductMedias(telegramId: string, product: Product): Promise<void> {
+    const meta = product.metadata as Record<string, unknown> | null;
+    if (!meta?.medias || !Array.isArray(meta.medias)) return;
+
+    const medias = meta.medias as Array<{
+      url: string;
+      mediaType: 'IMAGE' | 'VIDEO' | 'FILE';
+      caption?: string;
+    }>;
+
+    for (const media of medias) {
+      try {
+        if (media.mediaType === 'VIDEO') {
+          await telegramService.sendVideo(telegramId, media.url, media.caption);
+        } else if (media.mediaType === 'IMAGE') {
+          await telegramService.sendPhoto(telegramId, media.url, media.caption);
+        } else {
+          const msg = media.caption
+            ? `📎 ${media.caption}\n${media.url}`
+            : `📎 Arquivo: ${media.url}`;
+          await telegramService.sendMessage(telegramId, msg);
+        }
+      } catch (err) {
+        logger.error(`Erro ao enviar mídia extra do produto ${product.id}:`, err);
+      }
+    }
+  }
+
   private async sendOrderMedias(telegramId: string, orderId: string): Promise<void> {
     const medias = await prisma.deliveryMedia.findMany({
       where: { orderId },
@@ -161,7 +204,6 @@ class DeliveryService {
         } else if (media.mediaType === 'IMAGE') {
           await telegramService.sendPhoto(telegramId, media.url, media.caption ?? undefined);
         } else {
-          // FILE genérico — envia como link
           const msg = media.caption
             ? `📎 ${media.caption}\n${media.url}`
             : `📎 Arquivo: ${media.url}`;
