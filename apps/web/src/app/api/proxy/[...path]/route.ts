@@ -5,24 +5,12 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
   'https://api-production-a596.up.railway.app';
 
-/**
- * O Express assina cookies com cookieParser — o valor fica como "s%3AJWT..."
- * (ou "s:JWT..." decodificado). O JWT puro começa depois do prefixo.
- * Precisamos remover isso antes de mandar como Bearer.
- */
 function extractJwt(raw: string): string {
-  // decodifica URL encoding: s%3A → s:
   const decoded = decodeURIComponent(raw);
-  // remove prefixo de assinatura: "s:" seguido do JWT e "." + assinatura HMAC
   if (decoded.startsWith('s:')) {
-    // formato: s:<jwt>.<hmac_signature>
-    // o JWT em si é tudo entre "s:" e o último "."
-    const withoutPrefix = decoded.slice(2); // remove "s:"
-    // o JWT tem 3 partes separadas por "."; a assinatura do cookie é uma 4ª parte
-    // ex: header.payload.jwtSig.cookieSig
+    const withoutPrefix = decoded.slice(2);
     const parts = withoutPrefix.split('.');
     if (parts.length >= 4) {
-      // reconstrói apenas as 3 partes do JWT
       return parts.slice(0, 3).join('.');
     }
     return withoutPrefix;
@@ -37,6 +25,11 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
 
   const rawToken = request.cookies.get('auth_token')?.value;
   const authToken = rawToken ? extractJwt(rawToken) : null;
+
+  // LOG DE DEBUG — remover apos diagnostico
+  console.log('[proxy] rawToken:', rawToken ? rawToken.slice(0, 60) + '...' : 'NENHUM');
+  console.log('[proxy] authToken:', authToken ? authToken.slice(0, 60) + '...' : 'NENHUM');
+  console.log('[proxy] target:', targetUrl);
 
   const headers: Record<string, string> = {
     'Content-Type': request.headers.get('content-type') || 'application/json',
@@ -65,6 +58,12 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
     const apiRes = await fetch(targetUrl, { method, headers, body });
     const responseBody = await apiRes.text();
 
+    // LOG DE DEBUG
+    console.log('[proxy] api status:', apiRes.status);
+    if (apiRes.status >= 400) {
+      console.log('[proxy] api response:', responseBody.slice(0, 200));
+    }
+
     const response = new NextResponse(responseBody, {
       status: apiRes.status,
       statusText: apiRes.statusText,
@@ -77,7 +76,7 @@ async function proxyRequest(request: NextRequest, method: string): Promise<NextR
   } catch (error) {
     console.error('[proxy] fetch error:', targetUrl, error);
     return NextResponse.json(
-      { success: false, error: 'Erro de conexão com a API' },
+      { success: false, error: 'Erro de conexao com a API' },
       { status: 503 }
     );
   }
