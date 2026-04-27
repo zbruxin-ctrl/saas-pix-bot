@@ -1,4 +1,5 @@
 // routes/admin/adminProducts.ts
+// FIX BUG2: rotas estáticas (/stock, /orders/:id/medias, /orders/medias/:id) ANTES de /:id
 // SORT: PATCH /reorder para drag-and-drop no painel admin
 // SORT: GET / agora ordena por sortOrder asc, createdAt asc
 import { Router, Response } from 'express';
@@ -39,7 +40,7 @@ const reorderSchema = z.object({
   ).min(1),
 });
 
-// ─── Multer ───────────────────────────────────────────────────────────────
+// ─── Multer ───────────────────────────────────────────────────────────
 
 const uploadDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -119,7 +120,7 @@ async function syncFifoItems(
   return true;
 }
 
-// ─── Upload ────────────────────────────────────────────────────────────────────
+// ─── Upload ───────────────────────────────────────────────────────────────────
 
 adminProductsRouter.post(
   '/upload',
@@ -147,7 +148,7 @@ adminProductsRouter.post(
   }
 );
 
-// ─── Listagem (ordenada por sortOrder) ────────────────────────────────────────────
+// ─── Listagem (ordenada por sortOrder) ─────────────────────────────────────────────
 
 adminProductsRouter.get(
   '/',
@@ -176,7 +177,7 @@ adminProductsRouter.get(
   }
 );
 
-// ─── PATCH /reorder — drag-and-drop de produtos ──────────────────────────────────
+// ─── PATCH /reorder ───────────────────────────────────────────────────────────────
 
 adminProductsRouter.patch(
   '/reorder',
@@ -198,7 +199,7 @@ adminProductsRouter.patch(
   }
 );
 
-// ─── Estoque consolidado ─────────────────────────────────────────────────────
+// ─── GET /stock — ANTES de /:id para não ser capturado como /:id="stock" ────────
 
 adminProductsRouter.get(
   '/stock',
@@ -222,7 +223,44 @@ adminProductsRouter.get(
   }
 );
 
-// ─── GET /:id ───────────────────────────────────────────────────────────────────
+// ─── Rotas de mídia por pedido — ANTES de /:id para evitar captura pelo Express ──
+
+const mediaSchema = z.object({
+  url: z.string().url(),
+  mediaType: z.enum(['IMAGE', 'VIDEO', 'FILE']),
+  caption: z.string().max(500).optional(),
+  sortOrder: z.number().int().default(0),
+});
+
+adminProductsRouter.get(
+  '/orders/:orderId/medias',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const medias = await prisma.deliveryMedia.findMany({ where: { orderId: req.params.orderId }, orderBy: { sortOrder: 'asc' } });
+    res.json({ success: true, data: medias });
+  }
+);
+
+adminProductsRouter.post(
+  '/orders/:orderId/medias',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const data = mediaSchema.parse(req.body);
+    const media = await prisma.deliveryMedia.create({ data: { orderId: req.params.orderId, ...data } });
+    res.status(201).json({ success: true, data: media });
+  }
+);
+
+adminProductsRouter.delete(
+  '/orders/medias/:mediaId',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    await prisma.deliveryMedia.delete({ where: { id: req.params.mediaId } });
+    res.json({ success: true });
+  }
+);
+
+// ─── GET /:id — somente após todas as rotas estáticas ────────────────────────
 
 adminProductsRouter.get(
   '/:id',
@@ -280,7 +318,7 @@ adminProductsRouter.post(
   }
 );
 
-// ─── PUT /:id ───────────────────────────────────────────────────────────────────
+// ─── PUT /:id ─────────────────────────────────────────────────────────────────────
 
 adminProductsRouter.put(
   '/:id',
@@ -400,43 +438,6 @@ adminProductsRouter.delete(
   requireRole('SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     await prisma.stockItem.delete({ where: { id: req.params.itemId } });
-    res.json({ success: true });
-  }
-);
-
-// ─── Mídias de entrega por pedido ─────────────────────────────────────────────────
-
-const mediaSchema = z.object({
-  url: z.string().url(),
-  mediaType: z.enum(['IMAGE', 'VIDEO', 'FILE']),
-  caption: z.string().max(500).optional(),
-  sortOrder: z.number().int().default(0),
-});
-
-adminProductsRouter.get(
-  '/orders/:orderId/medias',
-  requireRole('ADMIN', 'SUPERADMIN'),
-  async (req: AuthenticatedRequest, res: Response) => {
-    const medias = await prisma.deliveryMedia.findMany({ where: { orderId: req.params.orderId }, orderBy: { sortOrder: 'asc' } });
-    res.json({ success: true, data: medias });
-  }
-);
-
-adminProductsRouter.post(
-  '/orders/:orderId/medias',
-  requireRole('ADMIN', 'SUPERADMIN'),
-  async (req: AuthenticatedRequest, res: Response) => {
-    const data = mediaSchema.parse(req.body);
-    const media = await prisma.deliveryMedia.create({ data: { orderId: req.params.orderId, ...data } });
-    res.status(201).json({ success: true, data: media });
-  }
-);
-
-adminProductsRouter.delete(
-  '/orders/medias/:mediaId',
-  requireRole('ADMIN', 'SUPERADMIN'),
-  async (req: AuthenticatedRequest, res: Response) => {
-    await prisma.deliveryMedia.delete({ where: { id: req.params.mediaId } });
     res.json({ success: true });
   }
 );
