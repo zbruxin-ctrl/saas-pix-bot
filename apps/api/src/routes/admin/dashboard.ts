@@ -1,7 +1,7 @@
 // routes/admin/dashboard.ts
+// FIX TS18047: p.product pode ser null (pagamentos de depósito de saldo não têm produto vinculado)
 // FIX L3: recentPayments mostra os últimos 10 dos últimos 7 dias (não de todos os tempos)
 // FIX M4: counts de status agrupados num único groupBy ao invés de 6 queries separadas
-// Queries sequenciais mantidas para respeitar connection_limit=1 do Neon free tier
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { AuthenticatedRequest } from '../../middleware/auth';
@@ -86,12 +86,14 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
         webhooksFailedToday,
         ordersWithFailure,
       },
+      // FIX TS18047: p.product é null para depósitos de saldo (productId: null)
+      // Usa optional chaining + fallback 'Depósito de Saldo'
       recentPayments: recentPayments.map((p) => ({
         id:          p.id,
         amount:      Number(p.amount),
         status:      p.status,
         approvedAt:  p.approvedAt,
-        productName: p.product.name,
+        productName: p.product?.name ?? 'Depósito de Saldo',
         userName:    p.telegramUser.firstName || p.telegramUser.username || 'Sem nome',
       })),
     },
