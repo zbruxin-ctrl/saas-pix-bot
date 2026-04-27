@@ -178,6 +178,7 @@ model Payment {
   pixExpiresAt   DateTime?
   approvedAt     DateTime?
   cancelledAt    DateTime?
+  expiredAt      DateTime?
   metadata       Json?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
@@ -185,14 +186,13 @@ model Payment {
   telegramUser     TelegramUser      @relation(fields: [telegramUserId], references: [id])
   product          Product?          @relation(fields: [productId], references: [id])
   order            Order?
-  webhookEvents    WebhookEvent[]
   stockReservation StockReservation?
   stockItem        StockItem?
+  webhookEvents    WebhookEvent[]
 
   @@index([telegramUserId])
   @@index([status])
   @@index([mercadoPagoId])
-  @@index([pixExpiresAt, status])
   @@map("payments")
 }
 
@@ -213,17 +213,18 @@ model Order {
   productId      String
   status         OrderStatus @default(PROCESSING)
   deliveredAt    DateTime?
+  failedAt       DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  payment        Payment        @relation(fields: [paymentId], references: [id])
-  telegramUser   TelegramUser   @relation(fields: [telegramUserId], references: [id])
-  product        Product        @relation(fields: [productId], references: [id])
-  deliveryLogs   DeliveryLog[]
-  deliveryMedias DeliveryMedia[]
-  stockItem      StockItem?
+  telegramUser TelegramUser  @relation(fields: [telegramUserId], references: [id])
+  payment      Payment       @relation(fields: [paymentId], references: [id])
+  product      Product       @relation(fields: [productId], references: [id])
+  deliveryLogs DeliveryLog[]
+  stockItem    StockItem?
 
   @@index([telegramUserId])
+  @@index([status])
   @@map("orders")
 }
 
@@ -231,78 +232,40 @@ enum OrderStatus {
   PROCESSING
   DELIVERED
   FAILED
-  CANCELLED
 }
 
-// ─── DeliveryMedia ────────────────────────────────────────────────────────────
-model DeliveryMedia {
-  id        String            @id @default(cuid())
-  orderId   String
-  url       String            @db.Text
-  mediaType DeliveryMediaType
-  caption   String?           @db.Text
-  sortOrder Int               @default(0)
-  createdAt DateTime          @default(now())
-
-  order Order @relation(fields: [orderId], references: [id])
-
-  @@index([orderId])
-  @@map("delivery_medias")
-}
-
-enum DeliveryMediaType {
-  IMAGE
-  VIDEO
-  FILE
-}
-
-// ─── DeliveryLog ─────────────────────────────────────────────────────────────
+// ─── DeliveryLog ──────────────────────────────────────────────────────────────
 model DeliveryLog {
-  id        String            @id @default(cuid())
+  id        String   @id @default(cuid())
   orderId   String
-  attempt   Int               @default(1)
-  status    DeliveryLogStatus
-  message   String?           @db.Text
-  error     String?           @db.Text
-  metadata  Json?
-  createdAt DateTime          @default(now())
+  status    String
+  attempt   Int      @default(1)
+  message   String?  @db.Text
+  createdAt DateTime @default(now())
 
   order Order @relation(fields: [orderId], references: [id])
 
   @@index([orderId])
+  @@index([status, createdAt])
   @@map("delivery_logs")
-}
-
-enum DeliveryLogStatus {
-  SUCCESS
-  FAILED
-  RETRYING
 }
 
 // ─── WebhookEvent ─────────────────────────────────────────────────────────────
 model WebhookEvent {
-  id          String             @id @default(cuid())
-  provider    String             @default("mercadopago")
-  eventType   String
-  externalId  String
-  paymentId   String?
-  rawPayload  Json
-  status      WebhookEventStatus @default(RECEIVED)
-  processedAt DateTime?
-  error       String?            @db.Text
-  createdAt   DateTime           @default(now())
+  id        String   @id @default(cuid())
+  source    String
+  eventType String
+  paymentId String?
+  payload   Json
+  status    String   @default("RECEIVED")
+  error     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   payment Payment? @relation(fields: [paymentId], references: [id])
 
-  @@unique([provider, externalId, eventType])
-  @@index([externalId])
+  @@index([status])
+  @@index([paymentId])
+  @@index([createdAt])
   @@map("webhook_events")
-}
-
-enum WebhookEventStatus {
-  RECEIVED
-  PROCESSING
-  PROCESSED
-  FAILED
-  IGNORED
 }
