@@ -1,4 +1,5 @@
 // Rotas de pagamento (usadas pelo bot)
+// FIX BUG8: GET /products movido para ANTES de GET /:id/status (Express capturava /products como /:id)
 // FIX BUG1: adiciona POST /:id/cancel para que o bot possa gravar CANCELLED no banco
 // FIX STOCK-DISPLAY: /products agora retorna availableStock calculado corretamente
 // WALLET: adiciona POST /deposit e GET /balance
@@ -27,6 +28,8 @@ const createDepositSchema = z.object({
   firstName: z.string().optional(),
   username: z.string().optional(),
 });
+
+// ─── Rotas estáticas PRIMEIRO (antes de qualquer /:param) ─────────────────────
 
 // POST /api/payments/create
 paymentsRouter.post(
@@ -105,34 +108,8 @@ paymentsRouter.get(
   }
 );
 
-// POST /api/payments/:id/cancel
-paymentsRouter.post(
-  '/:id/cancel',
-  requireBotSecret,
-  async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const result = await paymentService.cancelPayment(id);
-    if (!result.cancelled) {
-      res.status(400).json({ success: false, message: result.reason });
-      return;
-    }
-    logger.info(`Pagamento ${id} cancelado via bot`);
-    res.json({ success: true, message: result.reason });
-  }
-);
-
-// GET /api/payments/:id/status
-paymentsRouter.get(
-  '/:id/status',
-  requireBotSecret,
-  async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const status = await paymentService.getPaymentStatus(id);
-    res.json({ success: true, data: status });
-  }
-);
-
 // GET /api/payments/products
+// IMPORTANTE: deve ficar ANTES de GET /:id/status para o Express não capturar /products como /:id
 paymentsRouter.get(
   '/products',
   requireBotSecret,
@@ -185,5 +162,34 @@ paymentsRouter.get(
     );
 
     res.json({ success: true, data: available });
+  }
+);
+
+// ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────
+
+// POST /api/payments/:id/cancel
+paymentsRouter.post(
+  '/:id/cancel',
+  requireBotSecret,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const result = await paymentService.cancelPayment(id);
+    if (!result.cancelled) {
+      res.status(400).json({ success: false, message: result.reason });
+      return;
+    }
+    logger.info(`Pagamento ${id} cancelado via bot`);
+    res.json({ success: true, message: result.reason });
+  }
+);
+
+// GET /api/payments/:id/status
+paymentsRouter.get(
+  '/:id/status',
+  requireBotSecret,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const status = await paymentService.getPaymentStatus(id);
+    res.json({ success: true, data: status });
   }
 );
