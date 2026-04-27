@@ -23,7 +23,6 @@ interface Product extends ProductDTO {
   deliveryContent?: string | null;
   stockItems?: StockItemDTO[];
   _count?: { payments: number; orders: number };
-  sortOrder?: number;
 }
 
 interface DeliveryItem {
