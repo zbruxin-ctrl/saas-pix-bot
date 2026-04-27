@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProductDTO, DeliveryType, StockItemDTO } from '@saas-pix/shared';
 import {
   getProducts,
@@ -12,6 +12,7 @@ import {
   uploadMediaFile,
   getStockItems,
   createStockItem,
+  reorderProducts,
   type ProductMedia,
 } from '@/lib/api';
 import { formatCurrency } from '@/lib/utils';
@@ -22,6 +23,7 @@ interface Product extends ProductDTO {
   deliveryContent?: string | null;
   stockItems?: StockItemDTO[];
   _count?: { payments: number; orders: number };
+  sortOrder?: number;
 }
 
 interface DeliveryItem {
@@ -68,7 +70,6 @@ function itemsToContent(items: DeliveryItem[]): string {
   return JSON.stringify(vals);
 }
 
-/** Converte StockItems AVAILABLE em DeliveryItems para o formulário */
 function stockItemsToDeliveryItems(stockItems: StockItemDTO[]): DeliveryItem[] {
   if (!stockItems || stockItems.length === 0) return [newItem()];
   return stockItems.map((s) => ({ id: s.id, value: s.content }));
@@ -180,6 +181,105 @@ function MediaRow({ media, idx, onUpdate, onRemove }: MediaRowProps) {
   );
 }
 
+// ─── Drag-and-drop (nativo, sem biblioteca externa) ───────────────────────────
+
+interface SortableCardProps {
+  product: Product;
+  index: number;
+  isDragging: boolean;
+  isOver: boolean;
+  onDragStart: (index: number) => void;
+  onDragEnter: (index: number) => void;
+  onDragEnd: () => void;
+  onEdit: (p: Product) => void;
+  onDelete: (id: string) => void;
+}
+
+function SortableCard({
+  product: p,
+  index,
+  isDragging,
+  isOver,
+  onDragStart,
+  onDragEnter,
+  onDragEnd,
+  onEdit,
+  onDelete,
+}: SortableCardProps) {
+  const itemCount = p.stockItems ? p.stockItems.length : null;
+
+  return (
+    <div
+      draggable
+      onDragStart={() => onDragStart(index)}
+      onDragEnter={() => onDragEnter(index)}
+      onDragEnd={onDragEnd}
+      onDragOver={(e) => e.preventDefault()}
+      className={[
+        'card relative transition-all duration-150 cursor-default',
+        !p.isActive ? 'opacity-60' : '',
+        isDragging ? 'opacity-40 scale-95 shadow-lg ring-2 ring-blue-400' : '',
+        isOver && !isDragging ? 'ring-2 ring-blue-300 bg-blue-50/40' : '',
+      ].filter(Boolean).join(' ')}
+    >
+      {/* Handle de arrastar */}
+      <div
+        className="absolute top-3 right-3 cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 select-none z-10"
+        title="Arrastar para reordenar"
+        draggable={false}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <rect x="3" y="3" width="2" height="2" rx="1" />
+          <rect x="7" y="3" width="2" height="2" rx="1" />
+          <rect x="11" y="3" width="2" height="2" rx="1" />
+          <rect x="3" y="7" width="2" height="2" rx="1" />
+          <rect x="7" y="7" width="2" height="2" rx="1" />
+          <rect x="11" y="7" width="2" height="2" rx="1" />
+          <rect x="3" y="11" width="2" height="2" rx="1" />
+          <rect x="7" y="11" width="2" height="2" rx="1" />
+          <rect x="11" y="11" width="2" height="2" rx="1" />
+        </svg>
+      </div>
+
+      <div className="flex items-start justify-between mb-1 pr-8">
+        <h3 className="font-semibold text-gray-900 leading-snug">{p.name}</h3>
+        <span className={[
+          'shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ml-2',
+          p.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500',
+        ].join(' ')}>
+          {p.isActive ? 'Ativo' : 'Inativo'}
+        </span>
+      </div>
+      <p className="text-sm text-gray-500 mb-3 line-clamp-2">{p.description}</p>
+      <div className="text-2xl font-bold text-blue-600 mb-3">{formatCurrency(p.price)}</div>
+      <div className="flex items-center gap-2 text-xs text-gray-500 mb-4 flex-wrap">
+        <span className="bg-gray-100 px-2 py-1 rounded">{p.deliveryType}</span>
+        {itemCount !== null && (
+          <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded">
+            {itemCount} item{itemCount !== 1 ? 's' : ''} disponíveis
+          </span>
+        )}
+        {p.stock != null && (
+          <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded">
+            {p.stock} em estoque
+          </span>
+        )}
+      </div>
+      {p._count && (
+        <div className="text-xs text-gray-400 mb-4">
+          {p._count.payments} pagamentos · {p._count.orders} pedidos
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button onClick={() => onEdit(p)} className="btn-secondary text-sm flex-1">Editar</button>
+        <button onClick={() => onDelete(p.id)} className="btn-danger text-sm px-3" title="Desativar produto">🗑</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Componente principal ─────────────────────────────────────────────────────
+
 export default function ProductsClient() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -194,17 +294,29 @@ export default function ProductsClient() {
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
+  // ── Drag-and-drop state ──────────────────────────────────────────────────────
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [reordering, setReordering] = useState(false);
+
   const usesItemList = FIFO_TYPES.includes(form.deliveryType);
 
-  const loadProducts = () => {
+  // Produtos sem filtro de busca (usados para reordenação)
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
+
+  const loadProducts = useCallback(() => {
     setLoading(true);
     getProducts()
-      .then((data) => setProducts(data as Product[]))
+      .then((data) => {
+        const list = data as Product[];
+        setAllProducts(list);
+        setProducts(list);
+      })
       .catch(() => toast('Erro ao carregar produtos', 'error'))
       .finally(() => setLoading(false));
-  };
+  }, []);
 
-  useEffect(() => { loadProducts(); }, []);
+  useEffect(() => { loadProducts(); }, [loadProducts]);
 
   const filtered = useMemo(() => {
     return products.filter((p) => {
@@ -215,6 +327,52 @@ export default function ProductsClient() {
       return matchSearch && matchFilter;
     });
   }, [products, search, filter]);
+
+  // Determina se está com filtro/busca ativo (impede reordenação visual)
+  const isFiltering = search.trim() !== '' || filter !== 'all';
+
+  // ── Handlers drag-and-drop ───────────────────────────────────────────────────
+  function handleDragStart(index: number) {
+    if (isFiltering) return;
+    setDragIndex(index);
+  }
+
+  function handleDragEnter(index: number) {
+    if (dragIndex === null || dragIndex === index) return;
+    setOverIndex(index);
+  }
+
+  async function handleDragEnd() {
+    if (dragIndex === null || overIndex === null || dragIndex === overIndex) {
+      setDragIndex(null);
+      setOverIndex(null);
+      return;
+    }
+
+    // Reordena localmente
+    const reordered = [...products];
+    const [moved] = reordered.splice(dragIndex, 1);
+    reordered.splice(overIndex, 0, moved);
+    setProducts(reordered);
+    setAllProducts(reordered);
+    setDragIndex(null);
+    setOverIndex(null);
+
+    // Persiste no banco via API
+    setReordering(true);
+    try {
+      const payload = reordered.map((p, i) => ({ id: p.id, sortOrder: i }));
+      await reorderProducts(payload);
+      toast('Ordem atualizada com sucesso!', 'success');
+    } catch {
+      toast('Erro ao salvar ordem. Recarregando...', 'error');
+      loadProducts();
+    } finally {
+      setReordering(false);
+    }
+  }
+
+  // ── Formulário ───────────────────────────────────────────────────────────────
 
   function openCreate() {
     setForm(EMPTY_FORM);
@@ -241,13 +399,10 @@ export default function ProductsClient() {
     setFieldError('');
     setShowModal(true);
 
-    // ── Opção 2: popula itens FIFO a partir dos StockItems AVAILABLE ──
     if (FIFO_TYPES.includes(p.deliveryType)) {
-      // Se o produto já veio com stockItems (include da API), usa direto
       if (p.stockItems && p.stockItems.length > 0) {
         setItems(stockItemsToDeliveryItems(p.stockItems));
       } else {
-        // Caso contrário busca via API
         getStockItems(p.id)
           .then((si) => setItems(stockItemsToDeliveryItems(si)))
           .catch(() => setItems([newItem()]));
@@ -281,13 +436,11 @@ export default function ProductsClient() {
 
     try {
       const isFifo = FIFO_TYPES.includes(form.deliveryType);
-
-      // Para FIFO: serializa os itens como JSON e manda pro backend sincronizar
       const deliveryContent = isFifo ? itemsToContent(items) : form.deliveryContent;
       const fifoCount = isFifo ? items.filter((i) => i.value.trim()).length : null;
       const stockValue = isFifo ? fifoCount : form.stock ? parseInt(form.stock, 10) : null;
 
-      const existingMeta = (products.find((p) => p.id === editId)?.metadata ?? {}) as Record<string, unknown>;
+      const existingMeta = (allProducts.find((p) => p.id === editId)?.metadata ?? {}) as Record<string, unknown>;
       const newMetadata = {
         ...existingMeta,
         confirmationMessage: form.confirmationMessage.trim() || undefined,
@@ -352,6 +505,7 @@ export default function ProductsClient() {
           <h1 className="text-2xl font-bold text-gray-900">Produtos</h1>
           <p className="text-gray-500 text-sm mt-1">
             {filtered.length} de {products.length} produto{products.length !== 1 ? 's' : ''}
+            {reordering && <span className="ml-2 text-blue-500 animate-pulse">· Salvando ordem...</span>}
           </p>
         </div>
         <button onClick={openCreate} className="btn-primary">+ Novo Produto</button>
@@ -382,6 +536,13 @@ export default function ProductsClient() {
         </div>
       </div>
 
+      {/* Aviso quando filtro está ativo e drag está desativado */}
+      {isFiltering && !loading && products.length > 0 && (
+        <p className="text-xs text-gray-400 text-center">
+          ⚠️ Reordenação desativada durante busca/filtro. Limpe os filtros para arrastar.
+        </p>
+      )}
+
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {[...Array(6)].map((_, i) => (
@@ -403,48 +564,20 @@ export default function ProductsClient() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filtered.map((p) => {
-            // Conta os StockItems AVAILABLE (fonte de verdade)
-            const itemCount = p.stockItems ? p.stockItems.length : null;
-
-            return (
-              <div key={p.id} className={['card relative', !p.isActive ? 'opacity-60' : ''].join(' ')}>
-                <div className="flex items-start justify-between mb-1">
-                  <h3 className="font-semibold text-gray-900 pr-4 leading-snug">{p.name}</h3>
-                  <span className={[
-                    'shrink-0 text-xs px-2 py-0.5 rounded-full font-medium',
-                    p.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500',
-                  ].join(' ')}>
-                    {p.isActive ? 'Ativo' : 'Inativo'}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-500 mb-3 line-clamp-2">{p.description}</p>
-                <div className="text-2xl font-bold text-blue-600 mb-3">{formatCurrency(p.price)}</div>
-                <div className="flex items-center gap-2 text-xs text-gray-500 mb-4 flex-wrap">
-                  <span className="bg-gray-100 px-2 py-1 rounded">{p.deliveryType}</span>
-                  {itemCount !== null && (
-                    <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded">
-                      {itemCount} item{itemCount !== 1 ? 's' : ''} disponíveis
-                    </span>
-                  )}
-                  {p.stock != null && (
-                    <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded">
-                      {p.stock} em estoque
-                    </span>
-                  )}
-                </div>
-                {p._count && (
-                  <div className="text-xs text-gray-400 mb-4">
-                    {p._count.payments} pagamentos · {p._count.orders} pedidos
-                  </div>
-                )}
-                <div className="flex gap-2">
-                  <button onClick={() => openEdit(p)} className="btn-secondary text-sm flex-1">Editar</button>
-                  <button onClick={() => setConfirmDelete(p.id)} className="btn-danger text-sm px-3" title="Desativar produto">🗑</button>
-                </div>
-              </div>
-            );
-          })}
+          {filtered.map((p, index) => (
+            <SortableCard
+              key={p.id}
+              product={p}
+              index={index}
+              isDragging={dragIndex === index}
+              isOver={overIndex === index}
+              onDragStart={handleDragStart}
+              onDragEnter={handleDragEnter}
+              onDragEnd={handleDragEnd}
+              onEdit={openEdit}
+              onDelete={(id) => setConfirmDelete(id)}
+            />
+          ))}
         </div>
       )}
 
@@ -493,7 +626,6 @@ export default function ProductsClient() {
                 </select>
               </div>
 
-              {/* ── Itens FIFO — fonte de verdade: StockItems AVAILABLE ── */}
               {usesItemList && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -538,7 +670,6 @@ export default function ProductsClient() {
                 </div>
               )}
 
-              {/* ── Mensagem de entrega customizável ── */}
               <div className="border border-blue-100 bg-blue-50 rounded-xl p-4 space-y-2">
                 <label className="block text-sm font-semibold text-blue-800">✉️ Mensagem de entrega (opcional)</label>
                 <p className="text-xs text-blue-600">
@@ -554,7 +685,6 @@ export default function ProductsClient() {
                 />
               </div>
 
-              {/* ── Mídias de entrega (acopladas à mensagem) ── */}
               <div className="border border-gray-200 rounded-xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="block text-sm font-semibold text-gray-700">

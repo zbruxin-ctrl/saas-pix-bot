@@ -94,6 +94,14 @@ export async function deleteProduct(id: string): Promise<void> {
   await api.delete(`/admin/products/${id}`);
 }
 
+// ─── Reorder Products (drag-and-drop no painel admin) ────────────────────────
+
+export async function reorderProducts(
+  items: Array<{ id: string; sortOrder: number }>
+): Promise<void> {
+  await api.patch('/admin/products/reorder', { items });
+}
+
 // ─── Product Medias (usado em products-client.tsx) ────────────────────────────
 
 export async function getProductMedias(productId: string): Promise<ProductMedia[]> {
