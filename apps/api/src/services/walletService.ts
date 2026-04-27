@@ -1,5 +1,5 @@
 import { prisma } from '../lib/prisma';
-import { AppError } from '../utils/appError';
+import { AppError } from '../middleware/errorHandler';
 import type { WalletTransactionType } from '@saas-pix/shared';
 
 export class WalletService {
