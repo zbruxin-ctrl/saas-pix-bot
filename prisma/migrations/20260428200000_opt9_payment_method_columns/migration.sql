@@ -2,8 +2,11 @@
 -- Compatível com Neon.tech (PostgreSQL) — todas as colunas são nullable para
 -- não quebrar linhas existentes (backfill feito em runtime pelo paymentService)
 
--- 1. Cria o enum PaymentMethod
-CREATE TYPE "PaymentMethod" AS ENUM ('PIX', 'BALANCE', 'MIXED');
+-- 1. Cria o enum PaymentMethod (IF NOT EXISTS para ser idempotente)
+DO $$ BEGIN
+  CREATE TYPE "PaymentMethod" AS ENUM ('PIX', 'BALANCE', 'MIXED');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- 2. Adiciona as 3 colunas nullable em payments
 ALTER TABLE "payments"
@@ -16,10 +19,10 @@ ALTER TABLE "payments"
 UPDATE "payments"
 SET
   "paymentMethod" = CASE
-    WHEN metadata->>'paymentMethod' = 'BALANCE' THEN 'BALANCE'::\"PaymentMethod\"
-    WHEN metadata->>'paymentMethod' = 'MIXED'   THEN 'MIXED'::\"PaymentMethod\"
-    WHEN metadata->>'paymentMethod' = 'PIX'     THEN 'PIX'::\"PaymentMethod\"
-    WHEN metadata->>'paidWithBalance' = 'true'  THEN 'BALANCE'::\"PaymentMethod\"
+    WHEN metadata->>'paymentMethod' = 'BALANCE' THEN 'BALANCE'::"PaymentMethod"
+    WHEN metadata->>'paymentMethod' = 'MIXED'   THEN 'MIXED'::"PaymentMethod"
+    WHEN metadata->>'paymentMethod' = 'PIX'     THEN 'PIX'::"PaymentMethod"
+    WHEN metadata->>'paidWithBalance' = 'true'  THEN 'BALANCE'::"PaymentMethod"
     ELSE NULL
   END,
   "balanceUsed" = CASE
