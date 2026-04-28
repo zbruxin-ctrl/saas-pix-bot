@@ -4,6 +4,7 @@
 // FEATURE 3: animação de loading nos botões via answerCbQuery
 // FEATURE 4: escolha de método de pagamento (BALANCE | PIX | MIXED)
 // PERF #3: Promise.all para buscar produto + saldo em paralelo (era sequencial)
+// FIX WEBHOOK: bot não sobe servidor HTTP próprio — API recebe e repassa updates
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -44,7 +45,7 @@ function getSession(userId: number): UserSession {
 
 // ─── Bot ─────────────────────────────────────────────────────────────
 
-const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
+export const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
 
 // ─── Helper: editar mensagem principal ou enviar nova se não existir ───
 async function editOrReply(
@@ -183,9 +184,7 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   const userId = ctx.from!.id;
   const session = getSession(userId);
 
-  // PERF #3: busca produto (do cache/API) e saldo em paralelo com Promise.all
   let product: ProductDTO | undefined = session.products?.find((p) => p.id === productId);
-
   let balanceResult = 0;
 
   if (!product) {
@@ -202,7 +201,6 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
       return;
     }
   } else {
-    // Produto já em cache — busca só o saldo
     try {
       const walletData = await apiClient.getBalance(String(userId));
       balanceResult = Number(walletData.balance);
@@ -228,10 +226,6 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
 });
 
 // ─── Tela de escolha de método de pagamento ───────────────────────────
-// Regras:
-//   balance >= price  → Só Saldo | Só PIX
-//   0 < balance < price → Saldo + PIX | Só PIX
-//   balance == 0      → Só PIX
 
 async function showPaymentMethodScreen(
   ctx: Context,
@@ -241,7 +235,6 @@ async function showPaymentMethodScreen(
   const userId = ctx.from!.id;
   let balance = preloadedBalance ?? 0;
 
-  // Se não veio pré-carregado (chamada legada), busca agora
   if (preloadedBalance === undefined) {
     try {
       const walletData = await apiClient.getBalance(String(userId));
@@ -261,11 +254,9 @@ async function showPaymentMethodScreen(
     `🏦 *Seu saldo:* R$ ${balanceStr}\n\n` +
     `*Como deseja pagar?*`;
 
-  // Monta os botões de acordo com o saldo disponível
   const buttons = [];
 
   if (balance >= price) {
-    // Saldo cobre tudo: oferece pagar só com saldo
     buttons.push([
       Markup.button.callback(
         `💰 Só Saldo  (R$ ${price.toFixed(2)})`,
@@ -274,7 +265,6 @@ async function showPaymentMethodScreen(
     ]);
   }
 
-  // PIX sempre disponível
   buttons.push([
     Markup.button.callback(
       `📱 Só PIX  (R$ ${price.toFixed(2)})`,
@@ -283,7 +273,6 @@ async function showPaymentMethodScreen(
   ]);
 
   if (balance > 0 && balance < price) {
-    // Saldo parcial: oferece modo misto
     const pixDiff = (price - balance).toFixed(2);
     buttons.push([
       Markup.button.callback(
@@ -324,7 +313,6 @@ async function executePayment(
     session.paymentId = payment.paymentId;
     session.step = 'awaiting_payment';
 
-    // ── 100% Saldo ──
     if (payment.paidWithBalance) {
       await editOrReply(
         ctx,
@@ -343,7 +331,6 @@ async function executePayment(
       return;
     }
 
-    // ── PIX (puro ou MIXED) ──
     const expiresAt = new Date(payment.expiresAt);
     const expiresStr = expiresAt.toLocaleTimeString('pt-BR', {
       hour: '2-digit',
@@ -656,17 +643,19 @@ bot.catch((err, ctx) => {
 });
 
 // ─── Inicialização ────────────────────────────────────────────────────
+// Em produção: apenas registra o webhook no Telegram apontando para a API.
+// A API sobe o servidor HTTP e repassa os updates via bot.handleUpdate().
+// Em desenvolvimento: usa polling normalmente.
 
 async function startBot(): Promise<void> {
   if (env.NODE_ENV === 'production' && env.BOT_WEBHOOK_URL) {
-    await bot.launch({
-      webhook: {
-        domain: env.BOT_WEBHOOK_URL,
-        port: env.BOT_WEBHOOK_PORT,
-        path: '/telegram-webhook',
-      },
+    // Registra o webhook no Telegram — a URL deve ser a pública da API
+    const webhookUrl = `${env.BOT_WEBHOOK_URL}/telegram-webhook`;
+    await bot.telegram.setWebhook(webhookUrl, {
+      secret_token: env.TELEGRAM_BOT_SECRET,
     });
-    logger.info(`🤖 Bot iniciado em modo WEBHOOK: ${env.BOT_WEBHOOK_URL}/telegram-webhook`);
+    logger.info(`🤖 Bot em modo WEBHOOK registrado: ${webhookUrl}`);
+    logger.info('📡 Updates serão recebidos pela API e repassados via handleUpdate()');
   } else {
     await bot.launch();
     logger.info('🤖 Bot iniciado em modo POLLING (desenvolvimento)');

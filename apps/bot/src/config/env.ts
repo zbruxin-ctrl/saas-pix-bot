@@ -11,9 +11,10 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'TELEGRAM_BOT_TOKEN é obrigatório'),
   TELEGRAM_BOT_SECRET: z.string().min(16),
   API_URL: z.string().url().default('http://localhost:3001'),
-  // Para webhook mode (produção): URL pública do bot
+  // Em produção: URL pública da API (ex: https://api-production-a596.up.railway.app)
+  // O bot registra o webhook no Telegram apontando para essa URL.
+  // A API recebe os updates e repassa via bot.handleUpdate() — sem porta própria.
   BOT_WEBHOOK_URL: z.string().url().optional(),
-  BOT_WEBHOOK_PORT: z.string().default('3002').transform(Number),
 });
 
 function validateEnv() {

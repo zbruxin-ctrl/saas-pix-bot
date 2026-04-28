@@ -15,6 +15,7 @@ import { authRouter } from './routes/auth';
 import { paymentsRouter } from './routes/payments';
 import { webhooksRouter } from './routes/webhooks';
 import adminRouter from './routes/admin';
+import { telegramRouter } from './routes/telegram';
 import { startExpireJob, stopExpireJob } from './jobs/expirePayments';
 
 // build: 2026-04-28
@@ -23,9 +24,6 @@ app.set('trust proxy', 1);
 
 app.use(helmet({ contentSecurityPolicy: false }));
 
-// CORS: allowlist explícita + todos os subdominios *.vercel.app (deploys dinâmicos)
-// Para adicionar domínios próprios, configure ALLOWED_ORIGINS no Railway:
-//   ALLOWED_ORIGINS=https://meudominio.com,https://outro.com
 const extraOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -41,8 +39,7 @@ const allowedOrigins = [
 ].filter(Boolean) as string[];
 
 function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return true; // requests sem Origin (curl, Railway health checks)
-  // Permite qualquer subdomínio do Vercel (deploys de preview e produção)
+  if (!origin) return true;
   if (/^https:\/\/[a-z0-9-]+-[a-z0-9-]+-[a-z0-9]+-projects\.vercel\.app$/.test(origin)) return true;
   if (/^https:\/\/[a-zA-Z0-9-]+\.vercel\.app$/.test(origin)) return true;
   return allowedOrigins.includes(origin);
@@ -63,6 +60,11 @@ app.use(compression());
 app.use(cookieParser(env.COOKIE_SECRET));
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 app.use('/api/webhooks', express.raw({ type: 'application/json', limit: '1mb' }));
+
+// Rota do webhook do Telegram precisa de JSON parseado
+app.use('/telegram-webhook', express.json({ limit: '1mb' }));
+app.use('/telegram-webhook', telegramRouter);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
