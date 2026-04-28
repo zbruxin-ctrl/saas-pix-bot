@@ -3,6 +3,7 @@
 // PERF #2: cache global de produtos TTL 5min (era 60s) — reduz hits na API
 // PERF #4: retry automático 1x em timeout/network error
 // PERF #5: cache de saldo por usuário TTL 15s — evita 2 roundtrips na tela de seleção de produto
+// PERF #6: invalidação do cache de saldo após depósito
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
 import type {
@@ -72,7 +73,7 @@ class ApiClient {
         msg.toLowerCase().includes('network error') ||
         (err instanceof AxiosError && !err.response);
       if (isRetryable) {
-        await new Promise((r) => setTimeout(r, 300)); // reduzido de 500ms para 300ms
+        await new Promise((r) => setTimeout(r, 300));
         return await fn();
       }
       throw err;
@@ -129,6 +130,8 @@ class ApiClient {
     firstName?: string,
     username?: string
   ): Promise<CreateDepositResponse> {
+    // PERF #6: invalida cache de saldo após depósito (saldo será creditado)
+    invalidateBalanceCache(telegramId);
     const { data } = await this.withRetry(() =>
       this.client.post<ApiResponse<CreateDepositResponse>>('/api/payments/deposit', {
         telegramId,

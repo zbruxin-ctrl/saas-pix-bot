@@ -4,6 +4,7 @@
 // FEATURE 3: animação de loading nos botões via answerCbQuery
 // FEATURE 4: escolha de método de pagamento (BALANCE | PIX | MIXED)
 // PERF #3: Promise.all para buscar produto + saldo em paralelo (era sequencial)
+// PERF #7: limpeza de sessões idle antigas a cada 30min (evita vazamento de memória)
 // FIX WEBHOOK: bot registra handleUpdate na API via HTTP — sem import cruzado
 // FIX TS7016: removido node-fetch, usa fetch nativo do Node 20
 
@@ -33,16 +34,39 @@ interface UserSession {
   paymentId?: string;
   products?: ProductDTO[];
   mainMessageId?: number;
+  lastActivityAt: number;
 }
 
 const sessions = new Map<number, UserSession>();
 
 function getSession(userId: number): UserSession {
   if (!sessions.has(userId)) {
-    sessions.set(userId, { step: 'idle' });
+    sessions.set(userId, { step: 'idle', lastActivityAt: Date.now() });
   }
-  return sessions.get(userId)!;
+  const session = sessions.get(userId)!;
+  session.lastActivityAt = Date.now();
+  return session;
 }
+
+// PERF #7: limpa sessões idle com mais de 1h a cada 30min
+const SESSION_MAX_IDLE_MS = 60 * 60_000;    // 1 hora
+const SESSION_CLEANUP_INTERVAL_MS = 30 * 60_000; // 30 minutos
+
+function cleanupSessions(): void {
+  const now = Date.now();
+  let removed = 0;
+  for (const [userId, session] of sessions.entries()) {
+    if (session.step === 'idle' && now - session.lastActivityAt > SESSION_MAX_IDLE_MS) {
+      sessions.delete(userId);
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    logger.info(`[cleanup] ${removed} sessão(ões) idle removida(s). Total ativo: ${sessions.size}`);
+  }
+}
+
+setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL_MS);
 
 // ─── Bot ─────────────────────────────────────────────────────────────
 
@@ -90,7 +114,7 @@ bot.command('start', async (ctx) => {
   const firstName = ctx.from?.first_name || 'visitante';
   const userId = ctx.from!.id;
 
-  sessions.set(userId, { step: 'idle', mainMessageId: undefined });
+  sessions.set(userId, { step: 'idle', mainMessageId: undefined, lastActivityAt: Date.now() });
 
   const sent = await ctx.replyWithMarkdown(
     `👋 Olá, *${firstName}*! Bem-vindo!\n\n` +
@@ -472,7 +496,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
     logger.warn(`Não foi possível cancelar pagamento ${paymentId}: ${error instanceof Error ? error.message : error}`);
   }
 
-  sessions.set(userId, { step: 'idle' });
+  sessions.set(userId, { step: 'idle', lastActivityAt: Date.now() });
   await editOrReply(
     ctx,
     '\u274c *Pagamento cancelado.*\n\nVolte quando quiser!',
@@ -648,7 +672,6 @@ async function startBot(): Promise<void> {
     });
     logger.info(`🤖 Webhook registrado no Telegram: ${webhookUrl}`);
 
-    // Notifica a API para registrar o handleUpdate — usa fetch nativo do Node 20
     try {
       const res = await fetch(`${env.API_URL}/internal/register-bot`, {
         method: 'POST',
