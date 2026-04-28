@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+# Se SERVICE_NAME=bot, roda o bot direto sem migrations
+if [ "$SERVICE_NAME" = "bot" ]; then
+  echo '>>> Iniciando BOT'
+  exec node apps/bot/dist/index.js
+fi
+
+# Caso contrario, assume API
 echo '>>> [1/4] Resolvendo migrations com falha (se houver)'
 npx prisma migrate resolve \
   --schema=./prisma/schema.prisma \
