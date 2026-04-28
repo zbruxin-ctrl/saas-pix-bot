@@ -1,6 +1,6 @@
 {
   "installCommand": "cd ../.. && npm install",
-  "buildCommand": "cd ../../packages/shared && ../../node_modules/.bin/tsc && cd ../../apps/web && ../../node_modules/.bin/next build",
+  "buildCommand": "/vercel/path0/node_modules/.bin/tsc -p /vercel/path0/packages/shared/tsconfig.json && /vercel/path0/node_modules/.bin/next build",
   "outputDirectory": ".next",
   "framework": "nextjs"
 }
