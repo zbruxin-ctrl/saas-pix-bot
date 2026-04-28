@@ -1,6 +1,8 @@
 // Cliente HTTP para comunicação do bot com a API interna
 // PERF #1: timeout reduzido para 8s (era 15s) — feedback mais rápido ao usuário
+// PERF #2: cache global de produtos TTL 5min (era 60s) — reduz hits na API
 // PERF #4: retry automático 1x em timeout/network error
+// PERF #5: cache de saldo por usuário TTL 15s — evita 2 roundtrips na tela de seleção de produto
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
 import type {
@@ -12,16 +14,28 @@ import type {
   PaymentMethod,
 } from '@saas-pix/shared';
 
-// PERF #2: cache global de produtos compartilhado entre todas as sessões (TTL 60s)
+// PERF #2: cache global de produtos (TTL 5min — produtos raramente mudam)
 interface ProductCache {
   products: ProductDTO[];
   expiresAt: number;
 }
 let productCache: ProductCache | null = null;
-const PRODUCT_CACHE_TTL = 60_000; // 60 segundos
+const PRODUCT_CACHE_TTL = 5 * 60_000; // 5 minutos
 
 export function invalidateProductCache(): void {
   productCache = null;
+}
+
+// PERF #5: cache de saldo por usuário (TTL 15s — evita dupla chamada na tela de seleção)
+interface BalanceCache {
+  data: WalletBalanceResponse;
+  expiresAt: number;
+}
+const balanceCache = new Map<string, BalanceCache>();
+const BALANCE_CACHE_TTL = 15_000; // 15 segundos
+
+export function invalidateBalanceCache(telegramId: string): void {
+  balanceCache.delete(telegramId);
 }
 
 class ApiClient {
@@ -34,7 +48,7 @@ class ApiClient {
         'Content-Type': 'application/json',
         'x-bot-secret': env.TELEGRAM_BOT_SECRET,
       },
-      timeout: 8000, // PERF #1: era 15000
+      timeout: 8000,
     });
 
     this.client.interceptors.response.use(
@@ -46,7 +60,7 @@ class ApiClient {
     );
   }
 
-  // PERF #4: helper de retry automático 1x em caso de timeout ou network error
+  // PERF #4: retry automático 1x em caso de timeout ou network error
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
@@ -56,17 +70,16 @@ class ApiClient {
         msg.toLowerCase().includes('timeout') ||
         msg.toLowerCase().includes('econnreset') ||
         msg.toLowerCase().includes('network error') ||
-        (err instanceof AxiosError && !err.response); // sem resposta = network issue
+        (err instanceof AxiosError && !err.response);
       if (isRetryable) {
-        // Aguarda 500ms antes do retry para dar tempo ao servidor
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 300)); // reduzido de 500ms para 300ms
         return await fn();
       }
       throw err;
     }
   }
 
-  // PERF #2: usa cache global com TTL 60s; só bate na API se cache expirado
+  // PERF #2: cache global com TTL 5min
   async getProducts(): Promise<ProductDTO[]> {
     const now = Date.now();
     if (productCache && productCache.expiresAt > now) {
@@ -79,6 +92,22 @@ class ApiClient {
     return data.data!;
   }
 
+  // PERF #5: cache de saldo por usuário com TTL 15s
+  async getBalance(telegramId: string): Promise<WalletBalanceResponse> {
+    const now = Date.now();
+    const cached = balanceCache.get(telegramId);
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+    const { data } = await this.withRetry(() =>
+      this.client.get<ApiResponse<WalletBalanceResponse>>(
+        `/api/payments/balance?telegramId=${encodeURIComponent(telegramId)}`
+      )
+    );
+    balanceCache.set(telegramId, { data: data.data!, expiresAt: now + BALANCE_CACHE_TTL });
+    return data.data!;
+  }
+
   async createPayment(params: {
     telegramId: string;
     productId: string;
@@ -86,6 +115,8 @@ class ApiClient {
     username?: string;
     paymentMethod?: PaymentMethod;
   }): Promise<CreatePaymentResponse> {
+    // Invalida cache de saldo após compra (saldo mudou)
+    invalidateBalanceCache(params.telegramId);
     const { data } = await this.withRetry(() =>
       this.client.post<ApiResponse<CreatePaymentResponse>>('/api/payments/create', params)
     );
@@ -105,15 +136,6 @@ class ApiClient {
         firstName,
         username,
       })
-    );
-    return data.data!;
-  }
-
-  async getBalance(telegramId: string): Promise<WalletBalanceResponse> {
-    const { data } = await this.withRetry(() =>
-      this.client.get<ApiResponse<WalletBalanceResponse>>(
-        `/api/payments/balance?telegramId=${encodeURIComponent(telegramId)}`
-      )
     );
     return data.data!;
   }
