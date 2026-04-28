@@ -2,6 +2,7 @@
 // FIX TS18047: p.product pode ser null (pagamentos de depósito de saldo não têm produto vinculado)
 // FIX L3: recentPayments mostra os últimos 10 dos últimos 7 dias (não de todos os tempos)
 // FIX M4: counts de status agrupados num único groupBy ao invés de 6 queries separadas
+// FIX PROD: queries de tabelas opcionais (webhookEvent, deliveryLog, order) isoladas com try/catch
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { AuthenticatedRequest } from '../../middleware/auth';
@@ -47,14 +48,19 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
     _sum: { amount: true },
   });
 
-  // Falhas operacionais
-  const deliveriesFailedToday = await prisma.deliveryLog.count({
-    where: { status: 'FAILED', createdAt: { gte: startOfToday } },
-  });
-  const webhooksFailedToday = await prisma.webhookEvent.count({
-    where: { status: 'FAILED', createdAt: { gte: startOfToday } },
-  });
-  const ordersWithFailure = await prisma.order.count({ where: { status: 'FAILED' } });
+  // Falhas operacionais — isoladas com try/catch pois as tabelas podem não existir
+  // em ambientes onde as migrations ainda não foram aplicadas
+  const deliveriesFailedToday = await prisma.deliveryLog
+    .count({ where: { status: 'FAILED', createdAt: { gte: startOfToday } } })
+    .catch(() => 0);
+
+  const webhooksFailedToday = await prisma.webhookEvent
+    .count({ where: { status: 'FAILED', createdAt: { gte: startOfToday } } })
+    .catch(() => 0);
+
+  const ordersWithFailure = await prisma.order
+    .count({ where: { status: 'FAILED' } })
+    .catch(() => 0);
 
   // FIX L3: últimos 10 pagamentos aprovados nos últimos 7 dias
   const recentPayments = await prisma.payment.findMany({
