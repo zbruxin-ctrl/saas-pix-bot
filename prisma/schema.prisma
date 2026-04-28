@@ -1,5 +1,6 @@
 // schema.prisma
 // OPT #4: @@index([telegramUserId, status, pixExpiresAt]) adicionado ao model Payment
+// OPT #9: metadata → colunas reais (paymentMethod, balanceUsed, pixAmount) em Payment
 generator client {
   provider = "prisma-client-js"
 }
@@ -169,21 +170,26 @@ enum WalletTransactionType {
 
 // ─── Payment ──────────────────────────────────────────────────────────────────
 model Payment {
-  id             String        @id @default(cuid())
+  id             String         @id @default(cuid())
   telegramUserId String
   productId      String?
-  mercadoPagoId  String?       @unique
-  amount         Decimal       @db.Decimal(10, 2)
-  status         PaymentStatus @default(PENDING)
-  pixQrCode      String?       @db.Text
-  pixQrCodeText  String?       @db.Text
+  mercadoPagoId  String?        @unique
+  amount         Decimal        @db.Decimal(10, 2)
+  status         PaymentStatus  @default(PENDING)
+  pixQrCode      String?        @db.Text
+  pixQrCodeText  String?        @db.Text
   pixExpiresAt   DateTime?
   approvedAt     DateTime?
   cancelledAt    DateTime?
   expiredAt      DateTime?
+  // OPT #9: colunas reais substituindo leitura de metadata
+  paymentMethod  PaymentMethod?
+  balanceUsed    Decimal?       @db.Decimal(10, 2)
+  pixAmount      Decimal?       @db.Decimal(10, 2)
+  // metadata mantido para compatibilidade retroativa e depósitos
   metadata       Json?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   telegramUser     TelegramUser      @relation(fields: [telegramUserId], references: [id])
   product          Product?          @relation(fields: [productId], references: [id])
@@ -197,7 +203,15 @@ model Payment {
   @@index([mercadoPagoId])
   // OPT #4: índice composto para findFirst em reutilização de PIX e depósitos
   @@index([telegramUserId, status, pixExpiresAt])
+  // OPT #9: índice para queries por método de pagamento (analytics, relatórios)
+  @@index([paymentMethod, status])
   @@map("payments")
+}
+
+enum PaymentMethod {
+  PIX
+  BALANCE
+  MIXED
 }
 
 enum PaymentStatus {

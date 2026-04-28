@@ -11,7 +11,8 @@
 // OPT #6: getPaymentStatus com cache em memória TTL 5s
 // OPT #7: walletService.deposit no rollback com try/catch de auditoria
 // OPT #8: interfaces internas extraídas
-import { PaymentStatus } from '@prisma/client';
+// OPT #9: grava paymentMethod, balanceUsed, pixAmount em colunas reais (não mais só metadata)
+import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
 import { deliveryService } from './deliveryService';
@@ -158,7 +159,10 @@ export class PaymentService {
           amount: price,
           status: PaymentStatus.APPROVED,
           approvedAt: new Date(),
-          metadata: { firstName, username, productName: product.name, paidWithBalance: true },
+          // OPT #9: grava em coluna real + mantém metadata para compatibilidade
+          paymentMethod: PaymentMethod.BALANCE,
+          balanceUsed: price,
+          metadata: { firstName, username, productName: product.name, paidWithBalance: true, paymentMethod: 'BALANCE' },
         },
       });
 
@@ -231,7 +235,7 @@ export class PaymentService {
     };
   }
 
-  // ── OPT #2 + #7: Pagamento MISTO — 1 write final, estorno protegido ────────
+  // ── OPT #2 + #7 + #9: Pagamento MISTO — 1 write final, colunas reais ────────
   private async _payMixed({
     telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
@@ -239,13 +243,18 @@ export class PaymentService {
 
     const hasStockItems = await this.productHasStockItems(product.id);
 
-    // 1. Cria o payment como PENDING (ainda sem dados do MP)
+    // 1. Cria o payment como PENDING com colunas reais já preenchidas
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
         productId: product.id,
         amount: price,
         status: PaymentStatus.PENDING,
+        // OPT #9: colunas reais
+        paymentMethod: PaymentMethod.MIXED,
+        balanceUsed,
+        pixAmount,
+        // metadata mantido para compatibilidade retroativa
         metadata: { firstName, username, productName: product.name, paymentMethod: 'MIXED', balanceUsed, pixAmount },
       },
     });
@@ -284,7 +293,7 @@ export class PaymentService {
       });
     });
 
-    // 4. OPT #2: gera PIX e atualiza o payment em 1 write (update único ao invés de create+update)
+    // 4. OPT #2: gera PIX e atualiza o payment em 1 write
     try {
       const mpPayment = await mercadoPagoService.createPixPayment({
         transactionAmount: pixAmount,
@@ -341,18 +350,18 @@ export class PaymentService {
     }
   }
 
-  // ── OPT #2: Pagamento 100% PIX — 1 write (create com dados do MP direto) ──
+  // ── OPT #2 + #9: Pagamento 100% PIX — 1 write, coluna real ──────────────────
   private async _payWithPix({
     telegramUser, product, price, firstName, username,
   }: PayWithPixParams): Promise<CreatePaymentResponse> {
-    // Reutiliza PIX pendente existente
+    // OPT #9: reutiliza PIX pendente usando coluna real paymentMethod ao invés de metadata
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
         productId: product.id,
         status: PaymentStatus.PENDING,
         pixExpiresAt: { gt: new Date() },
-        metadata: { path: ['paymentMethod'], not: 'MIXED' },
+        paymentMethod: PaymentMethod.PIX,
       },
     });
 
@@ -370,8 +379,7 @@ export class PaymentService {
 
     const hasStockItems = await this.productHasStockItems(product.id);
 
-    // OPT #2: chama o MP ANTES de criar o registro no banco
-    // Assim fazemos apenas 1 insert com todos os dados prontos
+    // OPT #2: chama o MP ANTES de criar o registro no banco (1 único insert)
     let mpPayment: Awaited<ReturnType<typeof mercadoPagoService.createPixPayment>>;
     let pixExpiresAt: Date;
 
@@ -380,7 +388,6 @@ export class PaymentService {
         transactionAmount: price,
         description: `${product.name} - SaaS PIX Bot`,
         payerName: firstName || username || 'Usuário Telegram',
-        // externalReference será atualizado após o create — usamos um id temporário
         externalReference: `pending_${telegramUser.id}_${product.id}_${Date.now()}`,
         notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
       });
@@ -394,7 +401,7 @@ export class PaymentService {
       throw error;
     }
 
-    // Agora cria o payment já com todos os dados do MP — 1 único write
+    // OPT #9: grava paymentMethod como coluna real
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
@@ -405,6 +412,8 @@ export class PaymentService {
         pixQrCode: mpPayment.point_of_interaction.transaction_data.qr_code_base64,
         pixQrCodeText: mpPayment.point_of_interaction.transaction_data.qr_code,
         pixExpiresAt,
+        paymentMethod: PaymentMethod.PIX,
+        pixAmount: price,
         metadata: { firstName, username, productName: product.name, paymentMethod: 'PIX' },
       },
     });
@@ -444,6 +453,8 @@ export class PaymentService {
       create: { telegramId, firstName, username },
     });
 
+    // Depósito não tem paymentMethod definido (é operação de carteira, não compra)
+    // Mantém busca por metadata.type para compatibilidade com registros antigos
     const existingDeposit = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -472,6 +483,7 @@ export class PaymentService {
         productId: null,
         amount,
         status: PaymentStatus.PENDING,
+        // Depósito não tem paymentMethod (não é compra de produto)
         metadata: { firstName, username, type: 'WALLET_DEPOSIT' },
       },
     });
@@ -550,9 +562,11 @@ export class PaymentService {
       data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
     });
 
-    // Estorna saldo parcial se era MIXED — OPT #7: protegido com try/catch
-    const meta = payment.metadata as Record<string, unknown> | null;
-    const balanceUsed = meta?.balanceUsed as number | undefined;
+    // OPT #9: lê balanceUsed da coluna real; fallback para metadata (retrocompatibilidade)
+    const balanceUsed = payment.balanceUsed
+      ? Number(payment.balanceUsed)
+      : (payment.metadata as Record<string, unknown> | null)?.balanceUsed as number | undefined;
+
     if (balanceUsed && balanceUsed > 0) {
       try {
         await walletService.deposit(
@@ -571,7 +585,6 @@ export class PaymentService {
       await stockService.releaseReservation(paymentId, 'cancelado_pelo_usuario');
     }
 
-    // Invalida cache de status
     statusCache.delete(paymentId);
 
     logger.info(`[PaymentService] Pagamento ${paymentId} cancelado pelo usuário ${payment.telegramUser.telegramId}`);
@@ -613,11 +626,16 @@ export class PaymentService {
       return;
     }
 
-    const meta = payment.metadata as Record<string, unknown> | null;
-    const isMixed = meta?.paymentMethod === 'MIXED';
-    const verifyAmount = isMixed
-      ? (meta?.pixAmount as number)
-      : Number(payment.amount);
+    // OPT #9: lê isMixed da coluna real; fallback para metadata
+    const isMixed = payment.paymentMethod === PaymentMethod.MIXED
+      || (payment.metadata as Record<string, unknown> | null)?.paymentMethod === 'MIXED';
+
+    // OPT #9: lê pixAmount da coluna real; fallback para metadata
+    const pixAmountValue = payment.pixAmount
+      ? Number(payment.pixAmount)
+      : (payment.metadata as Record<string, unknown> | null)?.pixAmount as number | undefined;
+
+    const verifyAmount = isMixed && pixAmountValue ? pixAmountValue : Number(payment.amount);
 
     const { isApproved } = await mercadoPagoService.verifyPayment(
       payment.mercadoPagoId,
@@ -654,7 +672,6 @@ export class PaymentService {
         });
       });
 
-      // Invalida cache de status
       statusCache.delete(paymentId);
 
       logger.info(`[Deposit] Saldo creditado para ${payment.telegramUserId}: R$ ${Number(payment.amount).toFixed(2)}`);
@@ -703,7 +720,6 @@ export class PaymentService {
       return;
     }
 
-    // Invalida cache de status
     statusCache.delete(paymentId);
 
     await stockService.confirmReservation(paymentId);
@@ -727,9 +743,11 @@ export class PaymentService {
       data: { status: PaymentStatus.EXPIRED, expiredAt: new Date() },
     });
 
-    // Estorna saldo parcial se era MIXED — OPT #7: protegido
-    const meta = payment.metadata as Record<string, unknown> | null;
-    const balanceUsed = meta?.balanceUsed as number | undefined;
+    // OPT #9: lê balanceUsed da coluna real; fallback para metadata
+    const balanceUsed = payment.balanceUsed
+      ? Number(payment.balanceUsed)
+      : (payment.metadata as Record<string, unknown> | null)?.balanceUsed as number | undefined;
+
     if (balanceUsed && balanceUsed > 0) {
       try {
         await walletService.deposit(
@@ -748,7 +766,6 @@ export class PaymentService {
       await stockService.releaseReservation(paymentId, 'pagamento_expirado');
     }
 
-    // Invalida cache de status
     statusCache.delete(paymentId);
 
     logger.info(`Pagamento ${paymentId} marcado como EXPIRADO`);
