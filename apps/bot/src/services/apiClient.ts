@@ -1,7 +1,7 @@
 // Cliente HTTP para comunicação do bot com a API interna
-// OPT #A: timeout reduzido para 8s + retry automático 1x em timeout/network error
-// OPT #B: cache global de produtos com TTL 60s (compartilhado entre todos os usuários)
-import axios, { AxiosInstance } from 'axios';
+// PERF #1: timeout reduzido para 8s (era 15s) — feedback mais rápido ao usuário
+// PERF #4: retry automático 1x em timeout/network error
+import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
 import type {
   CreatePaymentResponse,
@@ -12,9 +12,17 @@ import type {
   PaymentMethod,
 } from '@saas-pix/shared';
 
-// ─── OPT #B: cache global de produtos ────────────────────────────────────────
-const PRODUCTS_CACHE_TTL = 60_000; // 60s
-let productsCache: { data: ProductDTO[]; expiresAt: number } | null = null;
+// PERF #2: cache global de produtos compartilhado entre todas as sessões (TTL 60s)
+interface ProductCache {
+  products: ProductDTO[];
+  expiresAt: number;
+}
+let productCache: ProductCache | null = null;
+const PRODUCT_CACHE_TTL = 60_000; // 60 segundos
+
+export function invalidateProductCache(): void {
+  productCache = null;
+}
 
 class ApiClient {
   private client: AxiosInstance;
@@ -26,45 +34,49 @@ class ApiClient {
         'Content-Type': 'application/json',
         'x-bot-secret': env.TELEGRAM_BOT_SECRET,
       },
-      timeout: 8000, // OPT #A: era 15000
+      timeout: 8000, // PERF #1: era 15000
     });
 
-    // OPT #A: retry automático 1x em timeout ou erro de rede
     this.client.interceptors.response.use(
       (r) => r,
-      async (error) => {
-        const isRetryable =
-          error.code === 'ECONNABORTED' ||
-          error.code === 'ECONNRESET' ||
-          error.code === 'ETIMEDOUT' ||
-          !error.response;
-
-        if (isRetryable && !error.config?._retried) {
-          error.config._retried = true;
-          await new Promise((r) => setTimeout(r, 500));
-          return this.client.request(error.config);
-        }
-
+      (error) => {
         const msg = error.response?.data?.error || error.message;
         throw new Error(msg);
       }
     );
   }
 
-  // OPT #B: retorna cache se válido, senão busca na API
-  async getProducts(): Promise<ProductDTO[]> {
-    const now = Date.now();
-    if (productsCache && productsCache.expiresAt > now) {
-      return productsCache.data;
+  // PERF #4: helper de retry automático 1x em caso de timeout ou network error
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      const isRetryable =
+        msg.toLowerCase().includes('timeout') ||
+        msg.toLowerCase().includes('econnreset') ||
+        msg.toLowerCase().includes('network error') ||
+        (err instanceof AxiosError && !err.response); // sem resposta = network issue
+      if (isRetryable) {
+        // Aguarda 500ms antes do retry para dar tempo ao servidor
+        await new Promise((r) => setTimeout(r, 500));
+        return await fn();
+      }
+      throw err;
     }
-    const { data } = await this.client.get<ApiResponse<ProductDTO[]>>('/api/payments/products');
-    productsCache = { data: data.data!, expiresAt: now + PRODUCTS_CACHE_TTL };
-    return productsCache.data;
   }
 
-  // OPT #B: força atualização do cache (chamado quando admin altera produtos)
-  invalidateProductsCache(): void {
-    productsCache = null;
+  // PERF #2: usa cache global com TTL 60s; só bate na API se cache expirado
+  async getProducts(): Promise<ProductDTO[]> {
+    const now = Date.now();
+    if (productCache && productCache.expiresAt > now) {
+      return productCache.products;
+    }
+    const { data } = await this.withRetry(() =>
+      this.client.get<ApiResponse<ProductDTO[]>>('/api/payments/products')
+    );
+    productCache = { products: data.data!, expiresAt: now + PRODUCT_CACHE_TTL };
+    return data.data!;
   }
 
   async createPayment(params: {
@@ -74,9 +86,8 @@ class ApiClient {
     username?: string;
     paymentMethod?: PaymentMethod;
   }): Promise<CreatePaymentResponse> {
-    const { data } = await this.client.post<ApiResponse<CreatePaymentResponse>>(
-      '/api/payments/create',
-      params
+    const { data } = await this.withRetry(() =>
+      this.client.post<ApiResponse<CreatePaymentResponse>>('/api/payments/create', params)
     );
     return data.data!;
   }
@@ -87,30 +98,40 @@ class ApiClient {
     firstName?: string,
     username?: string
   ): Promise<CreateDepositResponse> {
-    const { data } = await this.client.post<ApiResponse<CreateDepositResponse>>(
-      '/api/payments/deposit',
-      { telegramId, amount, firstName, username }
+    const { data } = await this.withRetry(() =>
+      this.client.post<ApiResponse<CreateDepositResponse>>('/api/payments/deposit', {
+        telegramId,
+        amount,
+        firstName,
+        username,
+      })
     );
     return data.data!;
   }
 
   async getBalance(telegramId: string): Promise<WalletBalanceResponse> {
-    const { data } = await this.client.get<ApiResponse<WalletBalanceResponse>>(
-      `/api/payments/balance?telegramId=${encodeURIComponent(telegramId)}`
+    const { data } = await this.withRetry(() =>
+      this.client.get<ApiResponse<WalletBalanceResponse>>(
+        `/api/payments/balance?telegramId=${encodeURIComponent(telegramId)}`
+      )
     );
     return data.data!;
   }
 
   async getPaymentStatus(paymentId: string): Promise<{ status: string; paymentId: string }> {
-    const { data } = await this.client.get<ApiResponse<{ status: string; paymentId: string }>>(
-      `/api/payments/${paymentId}/status`
+    const { data } = await this.withRetry(() =>
+      this.client.get<ApiResponse<{ status: string; paymentId: string }>>(
+        `/api/payments/${paymentId}/status`
+      )
     );
     return data.data!;
   }
 
   async cancelPayment(paymentId: string): Promise<{ cancelled: boolean; message: string }> {
-    const { data } = await this.client.post<ApiResponse<{ cancelled: boolean; message: string }>>(
-      `/api/payments/${paymentId}/cancel`
+    const { data } = await this.withRetry(() =>
+      this.client.post<ApiResponse<{ cancelled: boolean; message: string }>>(
+        `/api/payments/${paymentId}/cancel`
+      )
     );
     return data.data!;
   }

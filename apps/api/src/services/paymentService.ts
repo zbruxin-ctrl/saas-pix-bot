@@ -8,11 +8,11 @@
 // OPT #1: _payWithBalance move reserveStock para dentro da $transaction (sem race condition)
 // OPT #2: _payWithPix e _payMixed fazem 1 write ao invés de 2
 // OPT #3: productHasStockItems com cache em memória TTL 30s
+// OPT #5: cache de usuário conhecido em memória TTL 5min (evita upsert desnecessário)
 // OPT #6: getPaymentStatus com cache em memória TTL 5s
 // OPT #7: walletService.deposit no rollback com try/catch de auditoria
 // OPT #8: interfaces internas extraídas
 // OPT #9: grava paymentMethod, balanceUsed, pixAmount em colunas reais (não mais só metadata)
-// OPT #D: cache de usuário conhecido TTL 5min — evita upsert desnecessário em todo pagamento
 import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -72,18 +72,19 @@ interface PayMixedParams {
 const stockItemCacheTTL = 30_000;
 const stockItemCache = new Map<string, { value: boolean; expiresAt: number }>();
 
-// ─── OPT #6: cache de status de pagamento (TTL 5s) ───────────────────────────
-const statusCacheTTL = 5_000;
-const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
+// ─── OPT #5: cache de usuário conhecido (TTL 5min) ───────────────────────────
+// Evita upsert no banco quando firstName/username não mudaram
+const userCacheTTL = 5 * 60_000; // 5 minutos
+interface UserCacheEntry {
+  id: string;
+  balance: unknown;
+  firstName?: string | null;
+  username?: string | null;
+  expiresAt: number;
+}
+const userCache = new Map<string, UserCacheEntry>();
 
-// ─── OPT #D: cache de usuário conhecido (TTL 5min) ───────────────────────────
-// Evita upsert desnecessário ao banco em toda compra/depósito para usuários recorrentes.
-// Chave: telegramId | Valor: { id, balance, expiresAt }
-const USER_CACHE_TTL = 5 * 60_000; // 5 minutos
-const userCache = new Map<string, { id: string; balance: string; expiresAt: number }>();
-
-/** Retorna usuário do cache ou faz upsert e popula o cache */
-async function getOrUpsertUser(
+async function upsertUserCached(
   telegramId: string,
   firstName?: string,
   username?: string
@@ -91,12 +92,17 @@ async function getOrUpsertUser(
   const now = Date.now();
   const cached = userCache.get(telegramId);
 
-  // Cache hit: usuário conhecido, sem write no banco
-  if (cached && cached.expiresAt > now) {
+  // Usa cache se ainda válido E nome/username não mudaram
+  if (
+    cached &&
+    cached.expiresAt > now &&
+    cached.firstName === (firstName ?? null) &&
+    cached.username === (username ?? null)
+  ) {
     return { id: cached.id, balance: cached.balance };
   }
 
-  // Cache miss ou expirado: faz upsert e atualiza cache
+  // Cache miss ou dados mudaram: faz upsert real
   const user = await prisma.telegramUser.upsert({
     where: { telegramId },
     update: { firstName, username },
@@ -105,29 +111,35 @@ async function getOrUpsertUser(
 
   userCache.set(telegramId, {
     id: user.id,
-    balance: String(user.balance),
-    expiresAt: now + USER_CACHE_TTL,
+    balance: user.balance,
+    firstName: user.firstName ?? null,
+    username: user.username ?? null,
+    expiresAt: now + userCacheTTL,
   });
 
-  return user;
+  return { id: user.id, balance: user.balance };
 }
 
-/** Invalida o cache de usuário — chamado após qualquer operação que altere o saldo */
-function invalidateUserCache(telegramId: string): void {
+/** Invalida o cache de um usuário (chamar após qualquer alteração de saldo) */
+export function invalidateUserCache(telegramId: string): void {
   userCache.delete(telegramId);
 }
+
+// ─── OPT #6: cache de status de pagamento (TTL 5s) ───────────────────────────
+const statusCacheTTL = 5_000;
+const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
 
 export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username, paymentMethod } = data;
 
-    const product = await prisma.product.findUnique({
-      where: { id: productId, isActive: true },
-    });
-    if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
+    // OPT #5: busca produto e usuário em paralelo (produto não depende do usuário)
+    const [product, telegramUser] = await Promise.all([
+      prisma.product.findUnique({ where: { id: productId, isActive: true } }),
+      upsertUserCached(telegramId, firstName, username),
+    ]);
 
-    // OPT #D: usa cache de usuário em vez de sempre fazer upsert
-    const telegramUser = await getOrUpsertUser(telegramId, firstName, username);
+    if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
 
     const balance = Number(telegramUser.balance);
     const price = Number(product.price);
@@ -229,7 +241,7 @@ export class PaymentService {
       return { payment: newPayment, order: newOrder };
     });
 
-    // OPT #D: invalida cache após debitar saldo
+    // OPT #5: invalida cache do usuário após debitar saldo
     invalidateUserCache(telegramUser.id);
 
     if (product.stock !== null || hasStockItems) {
@@ -326,7 +338,7 @@ export class PaymentService {
       });
     });
 
-    // OPT #D: invalida cache após debitar saldo
+    // OPT #5: invalida cache após debitar saldo
     invalidateUserCache(telegramUser.id);
 
     try {
@@ -470,7 +482,6 @@ export class PaymentService {
     };
   }
 
-  /** BUG10 FIX: reutiliza PIX de depósito pendente para evitar múltiplos PIX simultâneos */
   async createDepositPayment(data: CreateDepositRequest): Promise<CreateDepositResponse> {
     const { telegramId, amount, firstName, username } = data;
 
@@ -478,8 +489,8 @@ export class PaymentService {
       throw new AppError('Valor de depósito deve ser entre R$ 1,00 e R$ 10.000,00', 400);
     }
 
-    // OPT #D: usa cache de usuário
-    const telegramUser = await getOrUpsertUser(telegramId, firstName, username);
+    // OPT #5: usa cache para upsert do usuário no depósito também
+    const telegramUser = await upsertUserCached(telegramId, firstName, username);
 
     const existingDeposit = await prisma.payment.findFirst({
       where: {
@@ -694,7 +705,7 @@ export class PaymentService {
         });
       });
 
-      // OPT #D: invalida cache após creditar saldo
+      // OPT #5: invalida cache após creditar saldo
       invalidateUserCache(payment.telegramUser.telegramId);
       statusCache.delete(paymentId);
 
@@ -789,6 +800,8 @@ export class PaymentService {
       await stockService.releaseReservation(paymentId, 'pagamento_expirado');
     }
 
+    // OPT #5: invalida cache do usuário após possível estorno de saldo
+    invalidateUserCache(payment.telegramUser.telegramId);
     statusCache.delete(paymentId);
 
     logger.info(`Pagamento ${paymentId} marcado como EXPIRADO`);

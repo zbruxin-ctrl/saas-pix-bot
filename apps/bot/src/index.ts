@@ -3,7 +3,7 @@
 // FEATURE 2: sistema de saldo (show_balance, deposit_balance, paidWithBalance)
 // FEATURE 3: animação de loading nos botões via answerCbQuery
 // FEATURE 4: escolha de método de pagamento (BALANCE | PIX | MIXED)
-// OPT #C: Promise.all para buscar produto + saldo em paralelo na tela de pagamento
+// PERF #3: Promise.all para buscar produto + saldo em paralelo (era sequencial)
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -183,18 +183,31 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   const userId = ctx.from!.id;
   const session = getSession(userId);
 
-  // OPT #C: busca produto em cache local da sessão ou no cache global
+  // PERF #3: busca produto (do cache/API) e saldo em paralelo com Promise.all
   let product: ProductDTO | undefined = session.products?.find((p) => p.id === productId);
 
-  // OPT #C: se não estava na sessão, busca via cache global do apiClient (sem hit na API se TTL válido)
+  let balanceResult = 0;
+
   if (!product) {
     try {
-      const products = await apiClient.getProducts();
+      const [products, walletData] = await Promise.all([
+        apiClient.getProducts(),
+        apiClient.getBalance(String(userId)).catch(() => ({ balance: 0, transactions: [] })),
+      ]);
       product = products.find((p) => p.id === productId);
       session.products = products;
+      balanceResult = Number(walletData.balance);
     } catch {
       await editOrReply(ctx, '\u274c Erro ao buscar produto. Tente novamente.');
       return;
+    }
+  } else {
+    // Produto já em cache — busca só o saldo
+    try {
+      const walletData = await apiClient.getBalance(String(userId));
+      balanceResult = Number(walletData.balance);
+    } catch {
+      balanceResult = 0;
     }
   }
 
@@ -211,21 +224,28 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   session.selectedProductId = productId;
   session.step = 'selecting_product';
 
-  await showPaymentMethodScreen(ctx, product);
+  await showPaymentMethodScreen(ctx, product, balanceResult);
 });
 
 // ─── Tela de escolha de método de pagamento ───────────────────────────
+// PERF #3: recebe o saldo já buscado em paralelo (sem request extra)
 
-async function showPaymentMethodScreen(ctx: Context, product: ProductDTO): Promise<void> {
+async function showPaymentMethodScreen(
+  ctx: Context,
+  product: ProductDTO,
+  preloadedBalance?: number
+): Promise<void> {
   const userId = ctx.from!.id;
+  let balance = preloadedBalance ?? 0;
 
-  // OPT #C: busca saldo em paralelo — não bloqueia se falhar
-  let balance = 0;
-  try {
-    const walletData = await apiClient.getBalance(String(userId));
-    balance = Number(walletData.balance);
-  } catch {
-    // Se não conseguir buscar saldo, exibe R$ 0
+  // Se não veio pré-carregado (chamada legada), busca agora
+  if (preloadedBalance === undefined) {
+    try {
+      const walletData = await apiClient.getBalance(String(userId));
+      balance = Number(walletData.balance);
+    } catch {
+      balance = 0;
+    }
   }
 
   const price = Number(product.price);
@@ -534,7 +554,7 @@ async function showProducts(ctx: Context): Promise<void> {
   session.step = 'idle';
 
   try {
-    const products = await apiClient.getProducts(); // usa cache global OPT #B
+    const products = await apiClient.getProducts();
     session.products = products;
 
     if (products.length === 0) {
