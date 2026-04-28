@@ -12,6 +12,7 @@
 // OPT #7: walletService.deposit no rollback com try/catch de auditoria
 // OPT #8: interfaces internas extraídas
 // OPT #9: grava paymentMethod, balanceUsed, pixAmount em colunas reais (não mais só metadata)
+// OPT #D: cache de usuário conhecido TTL 5min — evita upsert desnecessário em todo pagamento
 import { PaymentStatus, PaymentMethod } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -75,6 +76,47 @@ const stockItemCache = new Map<string, { value: boolean; expiresAt: number }>();
 const statusCacheTTL = 5_000;
 const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
 
+// ─── OPT #D: cache de usuário conhecido (TTL 5min) ───────────────────────────
+// Evita upsert desnecessário ao banco em toda compra/depósito para usuários recorrentes.
+// Chave: telegramId | Valor: { id, balance, expiresAt }
+const USER_CACHE_TTL = 5 * 60_000; // 5 minutos
+const userCache = new Map<string, { id: string; balance: string; expiresAt: number }>();
+
+/** Retorna usuário do cache ou faz upsert e popula o cache */
+async function getOrUpsertUser(
+  telegramId: string,
+  firstName?: string,
+  username?: string
+): Promise<{ id: string; balance: unknown }> {
+  const now = Date.now();
+  const cached = userCache.get(telegramId);
+
+  // Cache hit: usuário conhecido, sem write no banco
+  if (cached && cached.expiresAt > now) {
+    return { id: cached.id, balance: cached.balance };
+  }
+
+  // Cache miss ou expirado: faz upsert e atualiza cache
+  const user = await prisma.telegramUser.upsert({
+    where: { telegramId },
+    update: { firstName, username },
+    create: { telegramId, firstName, username },
+  });
+
+  userCache.set(telegramId, {
+    id: user.id,
+    balance: String(user.balance),
+    expiresAt: now + USER_CACHE_TTL,
+  });
+
+  return user;
+}
+
+/** Invalida o cache de usuário — chamado após qualquer operação que altere o saldo */
+function invalidateUserCache(telegramId: string): void {
+  userCache.delete(telegramId);
+}
+
 export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username, paymentMethod } = data;
@@ -84,11 +126,8 @@ export class PaymentService {
     });
     if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
 
-    const telegramUser = await prisma.telegramUser.upsert({
-      where: { telegramId },
-      update: { firstName, username },
-      create: { telegramId, firstName, username },
-    });
+    // OPT #D: usa cache de usuário em vez de sempre fazer upsert
+    const telegramUser = await getOrUpsertUser(telegramId, firstName, username);
 
     const balance = Number(telegramUser.balance);
     const price = Number(product.price);
@@ -143,7 +182,6 @@ export class PaymentService {
     const hasStockItems = await this.productHasStockItems(product.id);
 
     const { payment, order } = await prisma.$transaction(async (tx) => {
-      // Verifica e debita saldo atomicamente
       const currentUser = await tx.telegramUser.findUnique({
         where: { id: telegramUser.id },
         select: { balance: true },
@@ -159,7 +197,6 @@ export class PaymentService {
           amount: price,
           status: PaymentStatus.APPROVED,
           approvedAt: new Date(),
-          // OPT #9: grava em coluna real + mantém metadata para compatibilidade
           paymentMethod: PaymentMethod.BALANCE,
           balanceUsed: price,
           metadata: { firstName, username, productName: product.name, paidWithBalance: true, paymentMethod: 'BALANCE' },
@@ -192,14 +229,15 @@ export class PaymentService {
       return { payment: newPayment, order: newOrder };
     });
 
-    // Reserva e confirma estoque APÓS a transação financeira
+    // OPT #D: invalida cache após debitar saldo
+    invalidateUserCache(telegramUser.id);
+
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
         await stockService.confirmReservation(payment.id);
       } catch (err) {
         logger.error(`[Wallet] Erro ao reservar estoque para payment ${payment.id}:`, err);
-        // OPT #7: estorno com try/catch próprio para não perder o erro original
         try {
           await walletService.deposit(
             telegramUser.id,
@@ -235,7 +273,7 @@ export class PaymentService {
     };
   }
 
-  // ── OPT #2 + #7 + #9: Pagamento MISTO — 1 write final, colunas reais ────────
+  // ── OPT #2 + #7 + #9: Pagamento MISTO ────────────────────────────────────────
   private async _payMixed({
     telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
@@ -243,23 +281,19 @@ export class PaymentService {
 
     const hasStockItems = await this.productHasStockItems(product.id);
 
-    // 1. Cria o payment como PENDING com colunas reais já preenchidas
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
         productId: product.id,
         amount: price,
         status: PaymentStatus.PENDING,
-        // OPT #9: colunas reais
         paymentMethod: PaymentMethod.MIXED,
         balanceUsed,
         pixAmount,
-        // metadata mantido para compatibilidade retroativa
         metadata: { firstName, username, productName: product.name, paymentMethod: 'MIXED', balanceUsed, pixAmount },
       },
     });
 
-    // 2. Reserva estoque
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
@@ -269,7 +303,6 @@ export class PaymentService {
       }
     }
 
-    // 3. Debita saldo parcial
     await prisma.$transaction(async (tx) => {
       const currentUser = await tx.telegramUser.findUnique({
         where: { id: telegramUser.id },
@@ -293,7 +326,9 @@ export class PaymentService {
       });
     });
 
-    // 4. OPT #2: gera PIX e atualiza o payment em 1 write
+    // OPT #D: invalida cache após debitar saldo
+    invalidateUserCache(telegramUser.id);
+
     try {
       const mpPayment = await mercadoPagoService.createPixPayment({
         transactionAmount: pixAmount,
@@ -333,7 +368,6 @@ export class PaymentService {
         isMixed: true,
       };
     } catch (error) {
-      // OPT #7: estorno protegido com try/catch próprio
       try {
         await walletService.deposit(
           telegramUser.id,
@@ -350,11 +384,10 @@ export class PaymentService {
     }
   }
 
-  // ── OPT #2 + #9: Pagamento 100% PIX — 1 write, coluna real ──────────────────
+  // ── OPT #2 + #9: Pagamento 100% PIX ──────────────────────────────────────────
   private async _payWithPix({
     telegramUser, product, price, firstName, username,
   }: PayWithPixParams): Promise<CreatePaymentResponse> {
-    // OPT #9: reutiliza PIX pendente usando coluna real paymentMethod ao invés de metadata
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -379,7 +412,6 @@ export class PaymentService {
 
     const hasStockItems = await this.productHasStockItems(product.id);
 
-    // OPT #2: chama o MP ANTES de criar o registro no banco (1 único insert)
     let mpPayment: Awaited<ReturnType<typeof mercadoPagoService.createPixPayment>>;
     let pixExpiresAt: Date;
 
@@ -401,7 +433,6 @@ export class PaymentService {
       throw error;
     }
 
-    // OPT #9: grava paymentMethod como coluna real
     const payment = await prisma.payment.create({
       data: {
         telegramUserId: telegramUser.id,
@@ -447,14 +478,9 @@ export class PaymentService {
       throw new AppError('Valor de depósito deve ser entre R$ 1,00 e R$ 10.000,00', 400);
     }
 
-    const telegramUser = await prisma.telegramUser.upsert({
-      where: { telegramId },
-      update: { firstName, username },
-      create: { telegramId, firstName, username },
-    });
+    // OPT #D: usa cache de usuário
+    const telegramUser = await getOrUpsertUser(telegramId, firstName, username);
 
-    // Depósito não tem paymentMethod definido (é operação de carteira, não compra)
-    // Mantém busca por metadata.type para compatibilidade com registros antigos
     const existingDeposit = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -483,7 +509,6 @@ export class PaymentService {
         productId: null,
         amount,
         status: PaymentStatus.PENDING,
-        // Depósito não tem paymentMethod (não é compra de produto)
         metadata: { firstName, username, type: 'WALLET_DEPOSIT' },
       },
     });
@@ -562,7 +587,6 @@ export class PaymentService {
       data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
     });
 
-    // OPT #9: lê balanceUsed da coluna real; fallback para metadata (retrocompatibilidade)
     const balanceUsed = payment.balanceUsed
       ? Number(payment.balanceUsed)
       : (payment.metadata as Record<string, unknown> | null)?.balanceUsed as number | undefined;
@@ -626,11 +650,9 @@ export class PaymentService {
       return;
     }
 
-    // OPT #9: lê isMixed da coluna real; fallback para metadata
     const isMixed = payment.paymentMethod === PaymentMethod.MIXED
       || (payment.metadata as Record<string, unknown> | null)?.paymentMethod === 'MIXED';
 
-    // OPT #9: lê pixAmount da coluna real; fallback para metadata
     const pixAmountValue = payment.pixAmount
       ? Number(payment.pixAmount)
       : (payment.metadata as Record<string, unknown> | null)?.pixAmount as number | undefined;
@@ -672,6 +694,8 @@ export class PaymentService {
         });
       });
 
+      // OPT #D: invalida cache após creditar saldo
+      invalidateUserCache(payment.telegramUser.telegramId);
       statusCache.delete(paymentId);
 
       logger.info(`[Deposit] Saldo creditado para ${payment.telegramUserId}: R$ ${Number(payment.amount).toFixed(2)}`);
@@ -743,7 +767,6 @@ export class PaymentService {
       data: { status: PaymentStatus.EXPIRED, expiredAt: new Date() },
     });
 
-    // OPT #9: lê balanceUsed da coluna real; fallback para metadata
     const balanceUsed = payment.balanceUsed
       ? Number(payment.balanceUsed)
       : (payment.metadata as Record<string, unknown> | null)?.balanceUsed as number | undefined;

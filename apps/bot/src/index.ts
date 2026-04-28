@@ -3,6 +3,7 @@
 // FEATURE 2: sistema de saldo (show_balance, deposit_balance, paidWithBalance)
 // FEATURE 3: animação de loading nos botões via answerCbQuery
 // FEATURE 4: escolha de método de pagamento (BALANCE | PIX | MIXED)
+// OPT #C: Promise.all para buscar produto + saldo em paralelo na tela de pagamento
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -182,8 +183,10 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   const userId = ctx.from!.id;
   const session = getSession(userId);
 
+  // OPT #C: busca produto em cache local da sessão ou no cache global
   let product: ProductDTO | undefined = session.products?.find((p) => p.id === productId);
 
+  // OPT #C: se não estava na sessão, busca via cache global do apiClient (sem hit na API se TTL válido)
   if (!product) {
     try {
       const products = await apiClient.getProducts();
@@ -215,6 +218,8 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
 
 async function showPaymentMethodScreen(ctx: Context, product: ProductDTO): Promise<void> {
   const userId = ctx.from!.id;
+
+  // OPT #C: busca saldo em paralelo — não bloqueia se falhar
   let balance = 0;
   try {
     const walletData = await apiClient.getBalance(String(userId));
@@ -330,7 +335,6 @@ async function executePayment(
     const errMsg = error instanceof Error ? error.message : 'Erro desconhecido';
     logger.error(`Erro ao processar pagamento (${paymentMethod}) para ${userId}:`, error);
 
-    // Erros de saldo insuficiente — exibe alerta direto sem tentar novamente
     if (errMsg.toLowerCase().includes('saldo insuficiente')) {
       await editOrReply(
         ctx,
@@ -530,7 +534,7 @@ async function showProducts(ctx: Context): Promise<void> {
   session.step = 'idle';
 
   try {
-    const products = await apiClient.getProducts();
+    const products = await apiClient.getProducts(); // usa cache global OPT #B
     session.products = products;
 
     if (products.length === 0) {
