@@ -6,6 +6,7 @@
 // SORT: /products ordena por sortOrder, depois createdAt
 // OPT #5 v2: /products usa 1 groupBy para todos os COUNTs (elimina N queries separadas)
 // OPT #11: /balance resolve com include em 1 query ao invés de 2 sequenciais
+// FEATURE: GET /orders?telegramId=xxx — histórico de pedidos do usuário para o bot
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -179,6 +180,57 @@ paymentsRouter.get(
     );
 
     res.json({ success: true, data: available });
+  }
+);
+
+// GET /api/payments/orders?telegramId=xxx
+// Retorna os últimos 20 pedidos do usuário para o comando /meus_pedidos do bot.
+// Rota estática — deve ficar ANTES de /:id/status e /:id/cancel.
+paymentsRouter.get(
+  '/orders',
+  requireBotSecret,
+  async (req: Request, res: Response) => {
+    const { telegramId } = req.query as { telegramId?: string };
+    if (!telegramId) {
+      res.status(400).json({ success: false, error: 'telegramId é obrigatório' });
+      return;
+    }
+
+    const user = await prisma.telegramUser.findUnique({
+      where: { telegramId },
+      select: { id: true },
+    });
+
+    if (!user) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { telegramUserId: user.id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        deliveredAt: true,
+        product: { select: { name: true } },
+        payment: { select: { amount: true } },
+      },
+    });
+
+    res.json({
+      success: true,
+      data: orders.map((o) => ({
+        id: o.id,
+        status: o.status,
+        createdAt: o.createdAt.toISOString(),
+        deliveredAt: o.deliveredAt ? o.deliveredAt.toISOString() : null,
+        productName: o.product?.name ?? 'Produto',
+        amount: o.payment ? Number(o.payment.amount) : null,
+      })),
+    });
   }
 );
 
