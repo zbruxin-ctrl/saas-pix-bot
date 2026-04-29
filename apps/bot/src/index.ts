@@ -6,16 +6,16 @@
 // PERF #3: Promise.all para buscar produto + saldo em paralelo (era sequencial)
 // PERF #7: limpeza de sessões idle antigas a cada 30min (evita vazamento de memória)
 // FEATURE 5: /meus_pedidos com histórico real via API + valor pago
-// FIX WEBHOOK: bot registra handleUpdate na API via HTTP — sem import cruzado
+// FIX WEBHOOK: bot sobe servidor Express próprio na porta 8080 — webhook vai direto para o bot
 // FIX TS7016: removido node-fetch, usa fetch nativo do Node 20
 // FIX #1: suporte via env.SUPPORT_PHONE (sem hardcode)
 // FIX #2: showOrders exibe valor pago + método em cada pedido
 // FIX #3: PIX consolidado em uma única mensagem (QR Code + copia-e-cola no caption)
 // FIX #4: removido tipo inline no .map() de showOrders — usa OrderSummary diretamente
 // FIX #5: bot.telegram.getMe() após setWebhook — popula botInfo em modo webhook
-// FIX #6: /internal/register-bot agora existe na API (era 404)
-// FIX #7: retry com backoff exponencial no register-bot (era 502 por race condition de startup)
+// FIX #8: bot expõe servidor HTTP próprio (Express) — Telegram bate direto no bot, sem intermediário da API
 
+import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
@@ -756,66 +756,55 @@ bot.catch((err, ctx) => {
   logger.error(`Erro no bot para update ${ctx.update.update_id}:`, err);
 });
 
-// ─── FIX #7: retry com backoff exponencial ────────────────────────────
-// Problema: bot e API sobem em paralelo no Railway. O bot tentava registrar
-// na API imediatamente, mas a API ainda estava inicializando (Prisma, etc.)
-// e retornava 502. Agora o bot tenta até MAX_ATTEMPTS vezes com espera
-// crescente entre tentativas (1s → 2s → 4s → 8s → 16s).
-
-async function registerBotWithRetry(
-  apiUrl: string,
-  secret: string,
-  maxAttempts = 5
-): Promise<void> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await fetch(`${apiUrl}/internal/register-bot`, {
-        method: 'POST',
-        headers: { 'x-bot-secret': secret },
-      });
-
-      if (res.ok) {
-        logger.info('📡 Bot registrado na API via /internal/register-bot');
-        return;
-      }
-
-      logger.warn(`/internal/register-bot respondeu ${res.status} (tentativa ${attempt}/${maxAttempts})`);
-    } catch (e) {
-      logger.warn(`/internal/register-bot inacessível (tentativa ${attempt}/${maxAttempts}): ${e}`);
-    }
-
-    if (attempt < maxAttempts) {
-      const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s, 8s, 16s
-      logger.info(`⏳ Aguardando ${delayMs / 1000}s antes da próxima tentativa...`);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-
-  logger.error(`❌ Não foi possível registrar na API após ${maxAttempts} tentativas. O bot continua funcionando normalmente.`);
-}
-
-// ─── Inicialização ────────────────────────────────────────────────────
+// ─── FIX #8: servidor HTTP próprio do bot ────────────────────────────
+// O bot sobe um Express na porta 8080 e recebe os updates do Telegram diretamente.
+// Isso elimina a dependência do intermediário da API (que rodava em container separado
+// e nunca compartilhava memória com o bot — o _handler ficava null para sempre).
+// BOT_WEBHOOK_URL deve apontar para a URL pública deste container (bot), não da API.
 
 async function startBot(): Promise<void> {
   if (env.NODE_ENV === 'production' && env.BOT_WEBHOOK_URL) {
-    const webhookUrl = `${env.BOT_WEBHOOK_URL}/telegram-webhook`;
+    const PORT = parseInt(process.env.PORT ?? '8080', 10);
+    const webhookPath = '/telegram-webhook';
+    const webhookUrl = `${env.BOT_WEBHOOK_URL}${webhookPath}`;
 
+    // Registra o webhook no Telegram apontando para este container
     await bot.telegram.setWebhook(webhookUrl, {
       secret_token: env.TELEGRAM_BOT_SECRET,
     });
     logger.info(`🤖 Webhook registrado no Telegram: ${webhookUrl}`);
 
-    // FIX #5: em modo webhook o Telegraf não popula botInfo automaticamente.
-    // É necessário chamar getMe() explicitamente após setWebhook.
+    // Popula botInfo (necessário em modo webhook — Telegraf não faz isso automaticamente)
     const me = await bot.telegram.getMe();
     logger.info(`📌 Bot username: @${me.username}`);
 
-    // FIX #7: retry com backoff — API pode ainda estar inicializando
-    await registerBotWithRetry(env.API_URL, env.TELEGRAM_BOT_SECRET ?? '');
+    // Sobe o servidor HTTP para receber os updates
+    const app = express();
+    app.use(express.json());
+
+    app.post(webhookPath, async (req, res) => {
+      const secretToken = req.headers['x-telegram-bot-api-secret-token'];
+      if (env.TELEGRAM_BOT_SECRET && secretToken !== env.TELEGRAM_BOT_SECRET) {
+        res.sendStatus(403);
+        return;
+      }
+      try {
+        await bot.handleUpdate(req.body);
+      } catch (err) {
+        logger.error('[webhook] Erro ao processar update:', err);
+      }
+      res.sendStatus(200);
+    });
+
+    app.get('/health', (_req, res) => res.json({ status: 'ok', bot: me.username }));
+
+    app.listen(PORT, () => {
+      logger.info(`🚀 Servidor webhook do bot escutando na porta ${PORT}`);
+    });
 
   } else {
+    // Modo desenvolvimento: polling (sem necessidade de URL pública)
     await bot.launch();
-    // Em polling, botInfo é populado automaticamente pelo bot.launch()
     logger.info(`📌 Bot username: @${bot.botInfo?.username}`);
     logger.info('🤖 Bot iniciado em modo POLLING (desenvolvimento)');
   }
