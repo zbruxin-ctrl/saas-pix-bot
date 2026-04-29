@@ -1,6 +1,8 @@
 // schema.prisma
 // OPT #4: @@index([telegramUserId, status, pixExpiresAt]) adicionado ao model Payment
 // OPT #9: metadata → colunas reais (paymentMethod, balanceUsed, pixAmount) em Payment
+// FEAT #9: model AuditLog adicionado
+// FEAT #2/#3: model AdminSetting adicionado
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,7 +13,7 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// ─── Admin ──────────────────────────────────────────────────────────────────
+// ─── Admin ────────────────────────────────────────────────────────────────────────────
 model AdminUser {
   id           String     @id @default(cuid())
   email        String     @unique
@@ -23,6 +25,8 @@ model AdminUser {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
+  auditLogs    AuditLog[]
+
   @@map("admin_users")
 }
 
@@ -32,7 +36,36 @@ enum AdminRole {
   OPERATOR
 }
 
-// ─── Telegram ─────────────────────────────────────────────────────────────────
+// ─── AuditLog ────────────────────────────────────────────────────────────────────
+model AuditLog {
+  id         String    @id @default(cuid())
+  adminId    String
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   String?   @db.Text
+  ip         String?
+  createdAt  DateTime  @default(now())
+
+  admin AdminUser @relation(fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─── AdminSetting ───────────────────────────────────────────────────────────────
+model AdminSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+
+  @@map("admin_settings")
+}
+
+// ─── Telegram ──────────────────────────────────────────────────────────────────────
 model TelegramUser {
   id           String       @id @default(cuid())
   telegramId   String       @unique
@@ -53,7 +86,7 @@ model TelegramUser {
   @@map("telegram_users")
 }
 
-// ─── Produto ──────────────────────────────────────────────────────────────────
+// ─── Produto ──────────────────────────────────────────────────────────────────────
 model Product {
   id              String       @id @default(cuid())
   name            String
@@ -83,7 +116,7 @@ enum DeliveryType {
   ACCOUNT
 }
 
-// ─── StockItem ─────────────────────────────────────────────────────────────────
+// ─── StockItem ─────────────────────────────────────────────────────────────────────
 model StockItem {
   id          String          @id @default(cuid())
   productId   String
@@ -115,7 +148,7 @@ enum StockItemStatus {
   RELEASED
 }
 
-// ─── StockReservation ─────────────────────────────────────────────────────────
+// ─── StockReservation ─────────────────────────────────────────────────────────────
 model StockReservation {
   id             String                 @id @default(cuid())
   productId      String
@@ -145,7 +178,7 @@ enum StockReservationStatus {
   RELEASED
 }
 
-// ─── WalletTransaction ─────────────────────────────────────────────────────────
+// ─── WalletTransaction ──────────────────────────────────────────────────────────────
 model WalletTransaction {
   id             String                @id @default(cuid())
   telegramUserId String
@@ -168,7 +201,7 @@ enum WalletTransactionType {
   REFUND
 }
 
-// ─── Payment ──────────────────────────────────────────────────────────────────
+// ─── Payment ───────────────────────────────────────────────────────────────────────────
 model Payment {
   id             String         @id @default(cuid())
   telegramUserId String
@@ -223,7 +256,7 @@ enum PaymentStatus {
   REFUNDED
 }
 
-// ─── Order ────────────────────────────────────────────────────────────────────
+// ─── Order ────────────────────────────────────────────────────────────────────────────
 model Order {
   id             String      @id @default(cuid())
   paymentId      String      @unique
@@ -253,7 +286,7 @@ enum OrderStatus {
   FAILED
 }
 
-// ─── DeliveryLog ─────────────────────────────────────────────────────────────
+// ─── DeliveryLog ───────────────────────────────────────────────────────────────────
 model DeliveryLog {
   id        String   @id @default(cuid())
   orderId   String
@@ -270,7 +303,7 @@ model DeliveryLog {
   @@map("delivery_logs")
 }
 
-// ─── DeliveryMedia ───────────────────────────────────────────────────────────
+// ─── DeliveryMedia ─────────────────────────────────────────────────────────────────
 model DeliveryMedia {
   id        String   @id @default(cuid())
   orderId   String
@@ -286,7 +319,7 @@ model DeliveryMedia {
   @@map("delivery_medias")
 }
 
-// ─── WebhookEvent ────────────────────────────────────────────────────────────
+// ─── WebhookEvent ───────────────────────────────────────────────────────────────────
 model WebhookEvent {
   id          String             @id @default(cuid())
   provider    String
