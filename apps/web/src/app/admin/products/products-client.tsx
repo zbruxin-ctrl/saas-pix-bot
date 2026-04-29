@@ -295,7 +295,6 @@ function BulkImportModal({ deliveryType, onImport, onClose }: BulkImportModalPro
     ? '{"email":"conta1@mail.com","senha":"123456"}\n{"email":"conta2@mail.com","senha":"abcdef"}'
     : 'conta1@email.com:senha123\nconta2@email.com:senha456\nhttps://link-de-acesso-1.com';
 
-  // Valida JSON se for tipo ACCOUNT
   const jsonErrors: number[] = [];
   if (isAccount) {
     lines.forEach((line, i) => {
@@ -335,7 +334,6 @@ function BulkImportModal({ deliveryType, onImport, onClose }: BulkImportModalPro
             spellCheck={false}
           />
 
-          {/* Contador e erros */}
           <div className="flex items-center justify-between">
             <span className={`text-xs font-medium ${
               count > 0 ? 'text-green-700' : 'text-gray-400'
@@ -520,7 +518,6 @@ export default function ProductsClient() {
       id: String(Date.now() + Math.random()),
       value: line,
     }));
-    // Mantém itens existentes preenchidos + novos importados
     const merged = [...existingFilled, ...newItems];
     setItems(merged.length > 0 ? merged : [newItem()]);
     toast(`✓ ${lines.length} item${lines.length !== 1 ? 's' : ''} importado${lines.length !== 1 ? 's' : ''} com sucesso!`, 'success');
@@ -870,11 +867,12 @@ export default function ProductsClient() {
       )}
 
       <ConfirmModal
-        isOpen={!!confirmDelete}
+        open={!!confirmDelete}
         title="Desativar produto"
-        description="Tem certeza que deseja desativar este produto? Ele não será mais exibido no bot."
+        message="Tem certeza que deseja desativar este produto? Ele não será mais exibido no bot."
         confirmLabel="Desativar"
-        onConfirm={handleConfirmDelete}
+        danger
+        onConfirm={() => { void handleConfirmDelete(); }}
         onCancel={() => setConfirmDelete(null)}
       />
     </div>
