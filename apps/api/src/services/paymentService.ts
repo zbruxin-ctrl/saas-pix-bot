@@ -19,11 +19,19 @@
 //   → string anterior "pending_UUID_UUID_timestamp" continha underscores (_)
 //   → MP rejeita underscore no local-part do email → erro 4050
 //   → randomUUID() gera UUID puro; buildPayerEmail remove hifens → email limpo
-// FIX B11: _payMixed deduplica requests concorrentes
-//   → bot enviava 2 requests quase simultâneos; o 1º reservava o estoque e
-//     o 2º falhava com "Produto esgotado" mesmo havendo estoque
-//   → solução: findFirst por PENDING + MIXED + pixExpiresAt > now (igual ao _payWithPix)
-//   → 2º request retorna o pagamento já criado pelo 1º
+// FIX B11 (v2): _payMixed deduplica requests concorrentes em 2 níveis
+//   Problema original: bot enviava 2 requests quase simultâneos; o 1º reservava o
+//   estoque e o 2º falhava com "Produto esgotado" mesmo havendo estoque.
+//   Causa raiz: findFirst checava pixExpiresAt > now, mas o 2º request chegava
+//   enquanto o 1º ainda aguardava resposta do MercadoPago (antes de gravar
+//   pixExpiresAt). Portanto o dedup não pegava o pagamento recém-criado.
+//   Solução nível 1 (DB): findFirst com OR — pixExpiresAt > now OU
+//     (pixExpiresAt null E createdAt < 2min). Detecta pagamentos ainda processando.
+//     Se encontrado sem QR ainda, retorna 429 com mensagem amigável ao invés de
+//     tentar criar um segundo pagamento e falhar com "Produto esgotado".
+//   Solução nível 2 (memória): Set mixedPaymentLock keyed por userId:productId.
+//     Trava requests verdadeiramente simultâneos que chegam antes do DB registrar
+//     o primeiro pagamento (janela de milissegundos entre create e update do MP).
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -140,6 +148,11 @@ export function invalidateUserCache(telegramId: string): void {
 // ─── OPT #6: cache de status de pagamento (TTL 5s) ───────────────────────────
 const statusCacheTTL = 5_000;
 const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
+
+// ─── FIX B11 nível 2: lock in-memory para _payMixed simultâneos ──────────────
+// Chave: `mixed:{userId}:{productId}` — garante que apenas 1 request por
+// usuário+produto processe a criação do pagamento misto por vez.
+const mixedPaymentLock = new Set<string>();
 
 export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
@@ -294,142 +307,166 @@ export class PaymentService {
   private async _payMixed({
     telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
-    // FIX B11: deduplicação de requests concorrentes
-    // O bot pode disparar 2+ requests quase simultâneos (double-tap, retry do axios, etc).
-    // O 1º cria o pagamento e reserva o estoque; o 2º chegaria aqui com estoque já
-    // reservado e falharia com "Produto esgotado".
-    // Solução: se já existe um MIXED PENDING com pixExpiresAt no futuro para o mesmo
-    // usuário+produto, retornamos esse pagamento em vez de criar um novo.
+    // ── FIX B11 nível 1 (DB): detecta pagamento já existente ──────────────────
+    // Inclui OR para capturar pagamentos recém-criados que ainda não têm
+    // pixExpiresAt (MP ainda não respondeu). Sem esse OR, o 2º request chegava
+    // antes do prisma.payment.update com pixExpiresAt e criava um segundo
+    // pagamento, tentando reservar o mesmo estoque já reservado pelo 1º.
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
         productId: product.id,
         status: PaymentStatus.PENDING,
         paymentMethod: PaymentMethod.MIXED,
-        pixExpiresAt: { gt: new Date() },
+        OR: [
+          { pixExpiresAt: { gt: new Date() } },
+          // pagamento criado há menos de 2 min ainda sem pixExpiresAt (MP processando)
+          { pixExpiresAt: null, createdAt: { gt: new Date(Date.now() - 120_000) } },
+        ],
       },
+      orderBy: { createdAt: 'desc' },
     });
 
     if (existingPending) {
-      logger.info(`[Mixed] Pagamento MIXED pendente reutilizado: ${existingPending.id}`);
-      return {
-        paymentId: existingPending.id,
-        pixQrCode: existingPending.pixQrCode!,
-        pixQrCodeText: existingPending.pixQrCodeText!,
-        amount: Number(existingPending.amount),
-        pixAmount: Number(existingPending.pixAmount),
-        balanceUsed: Number(existingPending.balanceUsed),
-        expiresAt: existingPending.pixExpiresAt!.toISOString(),
-        productName: product.name,
-        isMixed: true,
-      };
+      // Pagamento já completo (tem QR code) — retorna diretamente
+      if (existingPending.pixQrCode && existingPending.pixExpiresAt) {
+        logger.info(`[Mixed] Pagamento MIXED pendente reutilizado: ${existingPending.id}`);
+        return {
+          paymentId: existingPending.id,
+          pixQrCode: existingPending.pixQrCode,
+          pixQrCodeText: existingPending.pixQrCodeText!,
+          amount: Number(existingPending.amount),
+          pixAmount: Number(existingPending.pixAmount),
+          balanceUsed: Number(existingPending.balanceUsed),
+          expiresAt: existingPending.pixExpiresAt.toISOString(),
+          productName: product.name,
+          isMixed: true,
+        };
+      }
+      // Pagamento existe mas 1º request ainda está criando o PIX no MP
+      logger.warn(`[Mixed] Request duplicado bloqueado (DB): payment ${existingPending.id} ainda processando`);
+      throw new AppError('Pagamento em processamento. Aguarde alguns instantes e tente novamente.', 429);
     }
 
-    logger.info(`[Mixed] Usuário ${telegramUser.id} | saldo: ${balanceUsed} | PIX: ${pixAmount}`);
-
-    const hasStockItems = await this.productHasStockItems(product.id);
-
-    const payment = await prisma.payment.create({
-      data: {
-        telegramUserId: telegramUser.id,
-        productId: product.id,
-        amount: price,
-        status: PaymentStatus.PENDING,
-        paymentMethod: PaymentMethod.MIXED,
-        balanceUsed,
-        pixAmount,
-        metadata: { firstName, username, productName: product.name, paymentMethod: 'MIXED', balanceUsed, pixAmount },
-      },
-    });
-
-    if (product.stock !== null || hasStockItems) {
-      try {
-        await stockService.reserveStock(product.id, telegramUser.id, payment.id);
-        invalidateStockItemCache(product.id);
-      } catch (err) {
-        await prisma.payment.delete({ where: { id: payment.id } });
-        throw err;
-      }
+    // ── FIX B11 nível 2 (memória): trava requests verdadeiramente simultâneos ──
+    // Cobre a janela de milissegundos em que o 1º request ainda não gravou o
+    // payment no DB, portanto o findFirst acima não encontraria nada.
+    const lockKey = `mixed:${telegramUser.id}:${product.id}`;
+    if (mixedPaymentLock.has(lockKey)) {
+      logger.warn(`[Mixed] Request duplicado bloqueado (lock): ${lockKey}`);
+      throw new AppError('Pagamento em processamento. Aguarde alguns instantes e tente novamente.', 429);
     }
-
-    await prisma.$transaction(async (tx) => {
-      const currentUser = await tx.telegramUser.findUnique({
-        where: { id: telegramUser.id },
-        select: { balance: true },
-      });
-      if (!currentUser || Number(currentUser.balance) < balanceUsed) {
-        throw new AppError('Saldo insuficiente.', 400);
-      }
-      await tx.telegramUser.update({
-        where: { id: telegramUser.id },
-        data: { balance: { decrement: balanceUsed } },
-      });
-      await tx.walletTransaction.create({
-        data: {
-          telegramUserId: telegramUser.id,
-          type: 'PURCHASE',
-          amount: balanceUsed,
-          description: `Saldo usado (misto): ${product.name}`,
-          paymentId: payment.id,
-        },
-      });
-    });
-
-    invalidateUserCache(telegramUser.id);
+    mixedPaymentLock.add(lockKey);
 
     try {
-      const mpPayment = await mercadoPagoService.createPixPayment({
-        transactionAmount: pixAmount,
-        description: `${product.name} (parte PIX) - SaaS PIX Bot`,
-        payerName: firstName || username || 'Usuário Telegram',
-        externalReference: payment.id,
-        notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
-      });
+      logger.info(`[Mixed] Usuário ${telegramUser.id} | saldo: ${balanceUsed} | PIX: ${pixAmount}`);
 
-      const raw = (mpPayment as { date_of_expiration?: string }).date_of_expiration;
-      let pixExpiresAt = raw ? new Date(raw) : new Date(Date.now() + 30 * 60 * 1000);
-      if (Number.isNaN(pixExpiresAt.getTime())) {
-        pixExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
-      }
+      const hasStockItems = await this.productHasStockItems(product.id);
 
-      const updated = await prisma.payment.update({
-        where: { id: payment.id },
+      const payment = await prisma.payment.create({
         data: {
-          mercadoPagoId: String(mpPayment.id),
-          pixQrCode: mpPayment.point_of_interaction.transaction_data.qr_code_base64,
-          pixQrCodeText: mpPayment.point_of_interaction.transaction_data.qr_code,
-          pixExpiresAt,
+          telegramUserId: telegramUser.id,
+          productId: product.id,
+          amount: price,
+          status: PaymentStatus.PENDING,
+          paymentMethod: PaymentMethod.MIXED,
+          balanceUsed,
+          pixAmount,
+          metadata: { firstName, username, productName: product.name, paymentMethod: 'MIXED', balanceUsed, pixAmount },
         },
       });
 
-      logger.info(`[Mixed] PIX gerado para payment ${payment.id} | MP ID: ${mpPayment.id}`);
-
-      return {
-        paymentId: updated.id,
-        pixQrCode: updated.pixQrCode!,
-        pixQrCodeText: updated.pixQrCodeText!,
-        amount: price,
-        pixAmount,
-        balanceUsed,
-        expiresAt: updated.pixExpiresAt!.toISOString(),
-        productName: product.name,
-        isMixed: true,
-      };
-    } catch (error) {
-      try {
-        await walletService.deposit(
-          telegramUser.id,
-          balanceUsed,
-          `Estorno automático (falha PIX misto): ${product.name}`,
-          payment.id,
-        );
-      } catch (estornoErr) {
-        logger.error(`[Mixed] CRÍTICO: falha no estorno do payment ${payment.id} — intervenção manual necessária`, estornoErr);
+      if (product.stock !== null || hasStockItems) {
+        try {
+          await stockService.reserveStock(product.id, telegramUser.id, payment.id);
+          invalidateStockItemCache(product.id);
+        } catch (err) {
+          await prisma.payment.delete({ where: { id: payment.id } });
+          throw err;
+        }
       }
-      await stockService.releaseReservation(payment.id, 'falha_criacao_mp_misto');
-      invalidateStockItemCache(product.id);
-      await prisma.payment.delete({ where: { id: payment.id } });
-      throw error;
+
+      await prisma.$transaction(async (tx) => {
+        const currentUser = await tx.telegramUser.findUnique({
+          where: { id: telegramUser.id },
+          select: { balance: true },
+        });
+        if (!currentUser || Number(currentUser.balance) < balanceUsed) {
+          throw new AppError('Saldo insuficiente.', 400);
+        }
+        await tx.telegramUser.update({
+          where: { id: telegramUser.id },
+          data: { balance: { decrement: balanceUsed } },
+        });
+        await tx.walletTransaction.create({
+          data: {
+            telegramUserId: telegramUser.id,
+            type: 'PURCHASE',
+            amount: balanceUsed,
+            description: `Saldo usado (misto): ${product.name}`,
+            paymentId: payment.id,
+          },
+        });
+      });
+
+      invalidateUserCache(telegramUser.id);
+
+      try {
+        const mpPayment = await mercadoPagoService.createPixPayment({
+          transactionAmount: pixAmount,
+          description: `${product.name} (parte PIX) - SaaS PIX Bot`,
+          payerName: firstName || username || 'Usuário Telegram',
+          externalReference: payment.id,
+          notificationUrl: `${env.API_URL}/api/webhooks/mercadopago`,
+        });
+
+        const raw = (mpPayment as { date_of_expiration?: string }).date_of_expiration;
+        let pixExpiresAt = raw ? new Date(raw) : new Date(Date.now() + 30 * 60 * 1000);
+        if (Number.isNaN(pixExpiresAt.getTime())) {
+          pixExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+        }
+
+        const updated = await prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            mercadoPagoId: String(mpPayment.id),
+            pixQrCode: mpPayment.point_of_interaction.transaction_data.qr_code_base64,
+            pixQrCodeText: mpPayment.point_of_interaction.transaction_data.qr_code,
+            pixExpiresAt,
+          },
+        });
+
+        logger.info(`[Mixed] PIX gerado para payment ${payment.id} | MP ID: ${mpPayment.id}`);
+
+        return {
+          paymentId: updated.id,
+          pixQrCode: updated.pixQrCode!,
+          pixQrCodeText: updated.pixQrCodeText!,
+          amount: price,
+          pixAmount,
+          balanceUsed,
+          expiresAt: updated.pixExpiresAt!.toISOString(),
+          productName: product.name,
+          isMixed: true,
+        };
+      } catch (error) {
+        try {
+          await walletService.deposit(
+            telegramUser.id,
+            balanceUsed,
+            `Estorno automático (falha PIX misto): ${product.name}`,
+            payment.id,
+          );
+        } catch (estornoErr) {
+          logger.error(`[Mixed] CRÍTICO: falha no estorno do payment ${payment.id} — intervenção manual necessária`, estornoErr);
+        }
+        await stockService.releaseReservation(payment.id, 'falha_criacao_mp_misto');
+        invalidateStockItemCache(product.id);
+        await prisma.payment.delete({ where: { id: payment.id } });
+        throw error;
+      }
+    } finally {
+      mixedPaymentLock.delete(lockKey);
     }
   }
 
