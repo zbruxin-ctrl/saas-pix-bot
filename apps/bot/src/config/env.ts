@@ -15,6 +15,9 @@ const envSchema = z.object({
   // O bot registra o webhook no Telegram apontando para essa URL.
   // A API recebe os updates e repassa via bot.handleUpdate() — sem porta própria.
   BOT_WEBHOOK_URL: z.string().url().optional(),
+  // Número de suporte no formato internacional sem espaços (ex: 5511999990000)
+  // Usado no link wa.me da Central de Ajuda do bot.
+  SUPPORT_PHONE: z.string().default('5511999990000'),
 });
 
 function validateEnv() {
