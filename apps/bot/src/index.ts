@@ -18,6 +18,7 @@
 // FIX #10: showHelp usa texto simples sem markdown problemático — corrige crash do botão Ajuda
 // FIX #11: todos os botões "Voltar" agora vão para show_home (menu inicial do /start), não show_products
 // FEATURE 6: setMyCommands registra menu de comandos no Telegram (botão ☰ na caixa de texto)
+// FIX #12: showHelp usa Markdown simples (sem escapes MarkdownV2) — remove barras inversas
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -87,7 +88,6 @@ setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL_MS);
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
 
 // ─── FEATURE 6: Registra o menu de comandos no Telegram ───────────────
-// Aparece como botão "☰" na caixa de texto — o usuário clica e vê os atalhos
 async function registerCommands(): Promise<void> {
   await bot.telegram.setMyCommands([
     { command: 'start',        description: '🏠 Menu inicial' },
@@ -213,7 +213,6 @@ bot.action('show_orders', async (ctx) => {
 
 // ─── Saldo ───────────────────────────────────────────────────────────
 
-// Função reutilizável para exibir saldo (usada por action E por comando /saldo)
 async function showBalance(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   try {
@@ -771,6 +770,8 @@ async function showOrders(ctx: Context): Promise<void> {
   }
 }
 
+// FIX #12: usa Markdown simples — sem escapes MarkdownV2 (\\. \\+ etc)
+// que causavam barras inversas visíveis na mensagem
 async function showHelp(ctx: Context): Promise<void> {
   const supportUrl = `https://wa.me/${env.SUPPORT_PHONE}`;
 
@@ -778,21 +779,21 @@ async function showHelp(ctx: Context): Promise<void> {
     ctx,
     `❓ *Central de Ajuda*\n\n` +
     `*Comandos disponíveis:*\n` +
-    `/start \u2014 Tela inicial\n` +
-    `/produtos \u2014 Ver produtos\n` +
-    `/saldo \u2014 Ver e adicionar saldo\n` +
-    `/meus\\_pedidos \u2014 Histórico de pedidos\n` +
-    `/ajuda \u2014 Esta mensagem\n\n` +
+    `/start — Tela inicial\n` +
+    `/produtos — Ver produtos\n` +
+    `/saldo — Ver e adicionar saldo\n` +
+    `/meus_pedidos — Histórico de pedidos\n` +
+    `/ajuda — Esta mensagem\n\n` +
     `*Como funciona?*\n` +
-    `1\\. Escolha um produto\n` +
-    `2\\. Escolha como pagar: saldo, PIX ou os dois\n` +
-    `3\\. Receba seu acesso automaticamente \u2705\n\n` +
-    `*Saldo pré\\-pago:*\n` +
-    `Faça um depósito uma vez e use para várias compras sem gerar PIX a cada vez\\.\n\n` +
-    `*Modo Saldo \\+ PIX:*\n` +
-    `Seu saldo cobre parte do valor e você paga o restante via PIX\\!\n\n` +
+    `1. Escolha um produto\n` +
+    `2. Escolha como pagar: saldo, PIX ou os dois\n` +
+    `3. Receba seu acesso automaticamente ✅\n\n` +
+    `*Saldo pré-pago:*\n` +
+    `Faça um depósito uma vez e use para várias compras sem gerar PIX a cada vez.\n\n` +
+    `*Modo Saldo + PIX:*\n` +
+    `Seu saldo cobre parte do valor e você paga o restante via PIX!\n\n` +
     `*Problemas com pagamento?*\n` +
-    `Entre em contato informando o ID do pagamento\\.`,
+    `Entre em contato informando o ID do pagamento.`,
     {
       reply_markup: Markup.inlineKeyboard([
         [Markup.button.url('📞 Contatar Suporte', supportUrl)],
@@ -824,7 +825,6 @@ async function startBot(): Promise<void> {
     const me = await bot.telegram.getMe();
     logger.info(`📌 Bot username: @${me.username}`);
 
-    // FEATURE 6: registra o menu ☰ de comandos no Telegram
     await registerCommands();
 
     const app = express();
@@ -855,7 +855,6 @@ async function startBot(): Promise<void> {
     logger.info(`📌 Bot username: @${bot.botInfo?.username}`);
     logger.info('🤖 Bot iniciado em modo POLLING (desenvolvimento)');
 
-    // FEATURE 6: registra o menu ☰ de comandos no Telegram (polling também)
     await registerCommands();
   }
 }

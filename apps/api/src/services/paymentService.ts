@@ -13,7 +13,9 @@
 // OPT #7: walletService.deposit no rollback com try/catch de auditoria
 // OPT #8: interfaces internas extraídas
 // OPT #9: grava paymentMethod, balanceUsed, pixAmount em colunas reais (não mais só metadata)
-import { PaymentStatus, PaymentMethod } from '@prisma/client';
+// FIX STOCK CACHE: productHasStockItems conta apenas AVAILABLE (não todos os StockItems)
+// FIX STOCK CACHE: invalida stockItemCache após reserveStock para evitar falso-negativo
+import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
 import { deliveryService } from './deliveryService';
@@ -69,12 +71,17 @@ interface PayMixedParams {
 }
 
 // ─── OPT #3: cache de productHasStockItems (TTL 30s) ─────────────────────────
+// FIX: armazena a contagem de itens AVAILABLE, não a presença total de StockItems
 const stockItemCacheTTL = 30_000;
 const stockItemCache = new Map<string, { value: boolean; expiresAt: number }>();
 
+/** Invalida o cache de estoque de um produto (chamar após reserveStock) */
+export function invalidateStockItemCache(productId: string): void {
+  stockItemCache.delete(productId);
+}
+
 // ─── OPT #5: cache de usuário conhecido (TTL 5min) ───────────────────────────
-// Evita upsert no banco quando firstName/username não mudaram
-const userCacheTTL = 5 * 60_000; // 5 minutos
+const userCacheTTL = 5 * 60_000;
 interface UserCacheEntry {
   id: string;
   balance: unknown;
@@ -92,7 +99,6 @@ async function upsertUserCached(
   const now = Date.now();
   const cached = userCache.get(telegramId);
 
-  // Usa cache se ainda válido E nome/username não mudaram
   if (
     cached &&
     cached.expiresAt > now &&
@@ -102,7 +108,6 @@ async function upsertUserCached(
     return { id: cached.id, balance: cached.balance };
   }
 
-  // Cache miss ou dados mudaram: faz upsert real
   const user = await prisma.telegramUser.upsert({
     where: { telegramId },
     update: { firstName, username },
@@ -133,7 +138,6 @@ export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username, paymentMethod } = data;
 
-    // OPT #5: busca produto e usuário em paralelo (produto não depende do usuário)
     const [product, telegramUser] = await Promise.all([
       prisma.product.findUnique({ where: { id: productId, isActive: true } }),
       upsertUserCached(telegramId, firstName, username),
@@ -144,7 +148,6 @@ export class PaymentService {
     const balance = Number(telegramUser.balance);
     const price = Number(product.price);
 
-    // ── Modo: BALANCE (só saldo) ──────────────────────────────────────────────
     if (paymentMethod === 'BALANCE') {
       if (balance < price) {
         throw new AppError(
@@ -155,7 +158,6 @@ export class PaymentService {
       return this._payWithBalance({ telegramUser, product, price, firstName, username });
     }
 
-    // ── Modo: MIXED (saldo parcial + PIX pela diferença) ──────────────────────
     if (paymentMethod === 'MIXED') {
       if (balance <= 0) {
         throw new AppError(
@@ -173,19 +175,16 @@ export class PaymentService {
       return this._payMixed({ telegramUser, product, price, balanceUsed, pixAmount, firstName, username });
     }
 
-    // ── Modo: PIX (forçado, ignora saldo) ────────────────────────────────────
     if (paymentMethod === 'PIX') {
       return this._payWithPix({ telegramUser, product, price, firstName, username });
     }
 
-    // ── Legado: comportamento antigo (auto-saldo se suficiente) ──────────────
     if (balance >= price) {
       return this._payWithBalance({ telegramUser, product, price, firstName, username });
     }
     return this._payWithPix({ telegramUser, product, price, firstName, username });
   }
 
-  // ── OPT #1: Pagamento 100% com saldo — reserva dentro da $transaction ────
   private async _payWithBalance({
     telegramUser, product, price, firstName, username,
   }: PayWithBalanceParams): Promise<CreatePaymentResponse> {
@@ -241,12 +240,13 @@ export class PaymentService {
       return { payment: newPayment, order: newOrder };
     });
 
-    // OPT #5: invalida cache do usuário após debitar saldo
     invalidateUserCache(telegramUser.id);
 
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
+        // Invalida cache após reserva bem-sucedida
+        invalidateStockItemCache(product.id);
         await stockService.confirmReservation(payment.id);
       } catch (err) {
         logger.error(`[Wallet] Erro ao reservar estoque para payment ${payment.id}:`, err);
@@ -285,7 +285,6 @@ export class PaymentService {
     };
   }
 
-  // ── OPT #2 + #7 + #9: Pagamento MISTO ────────────────────────────────────────
   private async _payMixed({
     telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
@@ -309,6 +308,8 @@ export class PaymentService {
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
+        // Invalida cache após reserva bem-sucedida para evitar cache stale
+        invalidateStockItemCache(product.id);
       } catch (err) {
         await prisma.payment.delete({ where: { id: payment.id } });
         throw err;
@@ -338,7 +339,6 @@ export class PaymentService {
       });
     });
 
-    // OPT #5: invalida cache após debitar saldo
     invalidateUserCache(telegramUser.id);
 
     try {
@@ -391,12 +391,13 @@ export class PaymentService {
         logger.error(`[Mixed] CRÍTICO: falha no estorno do payment ${payment.id} — intervenção manual necessária`, estornoErr);
       }
       await stockService.releaseReservation(payment.id, 'falha_criacao_mp_misto');
+      // Após liberar a reserva, invalida o cache para refletir o estoque disponível
+      invalidateStockItemCache(product.id);
       await prisma.payment.delete({ where: { id: payment.id } });
       throw error;
     }
   }
 
-  // ── OPT #2 + #9: Pagamento 100% PIX ──────────────────────────────────────────
   private async _payWithPix({
     telegramUser, product, price, firstName, username,
   }: PayWithPixParams): Promise<CreatePaymentResponse> {
@@ -464,6 +465,7 @@ export class PaymentService {
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
+        invalidateStockItemCache(product.id);
       } catch (err) {
         await prisma.payment.delete({ where: { id: payment.id } });
         throw err;
@@ -489,7 +491,6 @@ export class PaymentService {
       throw new AppError('Valor de depósito deve ser entre R$ 1,00 e R$ 10.000,00', 400);
     }
 
-    // OPT #5: usa cache para upsert do usuário no depósito também
     const telegramUser = await upsertUserCached(telegramId, firstName, username);
 
     const existingDeposit = await prisma.payment.findFirst({
@@ -564,13 +565,17 @@ export class PaymentService {
     }
   }
 
-  // ── OPT #3: cache em memória com TTL 30s ─────────────────────────────────
+  // FIX: conta apenas StockItems com status AVAILABLE
+  // O bug anterior contava TODOS os StockItems (RESERVED, CONFIRMED, DELIVERED)
+  // causando hasStockItems=true mesmo quando não havia unidades disponíveis
   private async productHasStockItems(productId: string): Promise<boolean> {
     const now = Date.now();
     const cached = stockItemCache.get(productId);
     if (cached && cached.expiresAt > now) return cached.value;
 
-    const count = await prisma.stockItem.count({ where: { productId } });
+    const count = await prisma.stockItem.count({
+      where: { productId, status: StockItemStatus.AVAILABLE },
+    });
     const value = count > 0;
     stockItemCache.set(productId, { value, expiresAt: now + stockItemCacheTTL });
     return value;
@@ -618,6 +623,7 @@ export class PaymentService {
 
     if (payment.productId) {
       await stockService.releaseReservation(paymentId, 'cancelado_pelo_usuario');
+      invalidateStockItemCache(payment.productId);
     }
 
     statusCache.delete(paymentId);
@@ -680,7 +686,6 @@ export class PaymentService {
       return;
     }
 
-    // ── WALLET DEPOSIT ────────────────────────────────────────────────────────
     if (!payment.productId) {
       await prisma.$transaction(async (tx) => {
         const updated = await tx.payment.updateMany({
@@ -705,7 +710,6 @@ export class PaymentService {
         });
       });
 
-      // OPT #5: invalida cache após creditar saldo
       invalidateUserCache(payment.telegramUser.telegramId);
       statusCache.delete(paymentId);
 
@@ -729,7 +733,6 @@ export class PaymentService {
       return;
     }
 
-    // ── Produto: modo MIXED / PIX — aprova e entrega ──────────────────────────
     const order = await prisma.$transaction(async (tx) => {
       const updated = await tx.payment.updateMany({
         where: { id: paymentId, status: PaymentStatus.PENDING },
@@ -758,6 +761,7 @@ export class PaymentService {
     statusCache.delete(paymentId);
 
     await stockService.confirmReservation(paymentId);
+    if (payment.productId) invalidateStockItemCache(payment.productId);
     await deliveryService.deliver(order.id, payment.telegramUser, payment.product!);
   }
 
@@ -798,9 +802,9 @@ export class PaymentService {
 
     if (payment.productId) {
       await stockService.releaseReservation(paymentId, 'pagamento_expirado');
+      invalidateStockItemCache(payment.productId);
     }
 
-    // OPT #5: invalida cache do usuário após possível estorno de saldo
     invalidateUserCache(payment.telegramUser.telegramId);
     statusCache.delete(paymentId);
 
@@ -816,7 +820,6 @@ export class PaymentService {
     }
   }
 
-  // ── OPT #6: cache de status com TTL 5s ───────────────────────────────────
   async getPaymentStatus(paymentId: string): Promise<{ status: PaymentStatus; paymentId: string }> {
     const now = Date.now();
     const cached = statusCache.get(paymentId);
