@@ -4,12 +4,19 @@
 // Requer SUPERADMIN. Executa em background (não trava o request).
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import { Telegraf } from 'telegraf';
 import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
 import { logger } from '../../lib/logger';
-import { bot } from '../../bot';
 
 export const broadcastRouter = Router();
+
+// Instancia Telegraf apenas para envio HTTP — sem iniciar polling/webhook
+function getTelegraf(): Telegraf {
+  const token = process.env.BOT_TOKEN;
+  if (!token) throw new Error('BOT_TOKEN não configurado');
+  return new Telegraf(token);
+}
 
 const broadcastSchema = z.object({
   message: z.string().min(1).max(4096),
@@ -50,19 +57,27 @@ broadcastRouter.post(
     // Responde imediatamente
     res.json({ success: true, jobId, total: users.length, status: 'queued' });
 
-    // Processa em background com throttle de 30 msg/s (limite Telegram: 30/s global)
+    // Processa em background com throttle de ~25 msg/s (limite Telegram: 30/s global)
     setImmediate(async () => {
       let sent = 0;
       let failed = 0;
       const BATCH = 25;
-      const DELAY_MS = 1100; // ~25 msg/s para ficar abaixo do limite
+      const DELAY_MS = 1100;
+
+      let tg: Telegraf;
+      try {
+        tg = getTelegraf();
+      } catch (err) {
+        logger.error(`[broadcast] jobId=${jobId} abortado: ${(err as Error).message}`);
+        return;
+      }
 
       for (let i = 0; i < users.length; i += BATCH) {
         const batch = users.slice(i, i + BATCH);
         await Promise.allSettled(
           batch.map(async (u) => {
             try {
-              await bot.telegram.sendMessage(u.telegramId, message, {
+              await tg.telegram.sendMessage(u.telegramId, message, {
                 parse_mode: parseMode as any,
               });
               sent++;
