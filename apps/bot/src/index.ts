@@ -11,12 +11,14 @@
 // FIX #1: suporte via env.SUPPORT_PHONE (sem hardcode)
 // FIX #2: showOrders exibe valor pago + método em cada pedido
 // FIX #3: PIX consolidado em uma única mensagem (QR Code + copia-e-cola no caption)
+// FIX #4: removido tipo inline no .map() de showOrders — usa OrderSummary diretamente
 
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
 import { env } from './config/env';
 import { apiClient } from './services/apiClient';
+import type { OrderSummary } from './services/apiClient';
 import type { ProductDTO, WalletTransactionDTO } from '@saas-pix/shared';
 
 import winston from 'winston';
@@ -368,13 +370,11 @@ async function executePayment(
       timeZone: 'America/Sao_Paulo',
     });
 
-    const pixValue = payment.isMixed ? payment.pixAmount! : payment.amount;
     const mixedLine = payment.isMixed
       ? `\n💳 *Saldo usado:* R$ ${Number(payment.balanceUsed).toFixed(2)}\n📱 *PIX a pagar:* R$ ${Number(payment.pixAmount).toFixed(2)}`
       : '';
 
     // FIX #3: PIX consolidado — QR Code + copia-e-cola em única mensagem (caption)
-    // Elimina as 3 mensagens separadas que quebravam o padrão editOrReply
     const qrBuffer = Buffer.from(payment.pixQrCode, 'base64');
     const caption =
       `💳 *Pagamento PIX Gerado!*\n\n` +
@@ -403,7 +403,6 @@ async function executePayment(
       }
     );
 
-    // Salva o ID da foto como nova mensagem principal para edições futuras de status
     session.mainMessageId = qrMsg.message_id;
 
     logger.info(`[${paymentMethod}] PIX gerado para usuário ${userId} | Pagamento: ${payment.paymentId}`);
@@ -670,20 +669,15 @@ async function showOrders(ctx: Context): Promise<void> {
       PROCESSING: '🔄',
     };
 
-    // FIX #2: exibe valor pago e método de pagamento em cada pedido
-    const lines = orders.slice(0, 10).map((o: {
-      productName: string;
-      status: string;
-      createdAt: string;
-      amount?: number | string;
-      paymentMethod?: string;
-    }) => {
+    // FIX #2: usa OrderSummary diretamente — sem tipo inline incompatível
+    // FIX #4: amount é number | null; usa null-check em vez de != null para clareza
+    const lines = orders.slice(0, 10).map((o: OrderSummary) => {
       const emoji = statusEmoji[o.status] ?? '📦';
       const date = new Date(o.createdAt).toLocaleDateString('pt-BR', {
         day: '2-digit', month: '2-digit', year: '2-digit',
         timeZone: 'America/Sao_Paulo',
       });
-      const valor = o.amount != null ? ` · R$ ${Number(o.amount).toFixed(2)}` : '';
+      const valor = o.amount !== null ? ` · R$ ${Number(o.amount).toFixed(2)}` : '';
       const metodo = o.paymentMethod === 'BALANCE'
         ? ' · 💰Saldo'
         : o.paymentMethod === 'MIXED'
