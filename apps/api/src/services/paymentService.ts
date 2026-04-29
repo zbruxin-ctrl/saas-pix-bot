@@ -19,6 +19,11 @@
 //   → string anterior "pending_UUID_UUID_timestamp" continha underscores (_)
 //   → MP rejeita underscore no local-part do email → erro 4050
 //   → randomUUID() gera UUID puro; buildPayerEmail remove hifens → email limpo
+// FIX B11: _payMixed deduplica requests concorrentes
+//   → bot enviava 2 requests quase simultâneos; o 1º reservava o estoque e
+//     o 2º falhava com "Produto esgotado" mesmo havendo estoque
+//   → solução: findFirst por PENDING + MIXED + pixExpiresAt > now (igual ao _payWithPix)
+//   → 2º request retorna o pagamento já criado pelo 1º
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -76,11 +81,9 @@ interface PayMixedParams {
 }
 
 // ─── OPT #3: cache de productHasStockItems (TTL 30s) ─────────────────────────
-// FIX: armazena a contagem de itens AVAILABLE, não a presença total de StockItems
 const stockItemCacheTTL = 30_000;
 const stockItemCache = new Map<string, { value: boolean; expiresAt: number }>();
 
-/** Invalida o cache de estoque de um produto (chamar após reserveStock) */
 export function invalidateStockItemCache(productId: string): void {
   stockItemCache.delete(productId);
 }
@@ -130,7 +133,6 @@ async function upsertUserCached(
   return { id: user.id, balance: user.balance };
 }
 
-/** Invalida o cache de um usuário (chamar após qualquer alteração de saldo) */
 export function invalidateUserCache(telegramId: string): void {
   userCache.delete(telegramId);
 }
@@ -292,6 +294,37 @@ export class PaymentService {
   private async _payMixed({
     telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
+    // FIX B11: deduplicação de requests concorrentes
+    // O bot pode disparar 2+ requests quase simultâneos (double-tap, retry do axios, etc).
+    // O 1º cria o pagamento e reserva o estoque; o 2º chegaria aqui com estoque já
+    // reservado e falharia com "Produto esgotado".
+    // Solução: se já existe um MIXED PENDING com pixExpiresAt no futuro para o mesmo
+    // usuário+produto, retornamos esse pagamento em vez de criar um novo.
+    const existingPending = await prisma.payment.findFirst({
+      where: {
+        telegramUserId: telegramUser.id,
+        productId: product.id,
+        status: PaymentStatus.PENDING,
+        paymentMethod: PaymentMethod.MIXED,
+        pixExpiresAt: { gt: new Date() },
+      },
+    });
+
+    if (existingPending) {
+      logger.info(`[Mixed] Pagamento MIXED pendente reutilizado: ${existingPending.id}`);
+      return {
+        paymentId: existingPending.id,
+        pixQrCode: existingPending.pixQrCode!,
+        pixQrCodeText: existingPending.pixQrCodeText!,
+        amount: Number(existingPending.amount),
+        pixAmount: Number(existingPending.pixAmount),
+        balanceUsed: Number(existingPending.balanceUsed),
+        expiresAt: existingPending.pixExpiresAt!.toISOString(),
+        productName: product.name,
+        isMixed: true,
+      };
+    }
+
     logger.info(`[Mixed] Usuário ${telegramUser.id} | saldo: ${balanceUsed} | PIX: ${pixAmount}`);
 
     const hasStockItems = await this.productHasStockItems(product.id);
@@ -430,10 +463,6 @@ export class PaymentService {
     let mpPayment: Awaited<ReturnType<typeof mercadoPagoService.createPixPayment>>;
     let pixExpiresAt: Date;
 
-    // FIX B9: usa randomUUID() como externalReference em vez de
-    // `pending_${userId}_${productId}_${Date.now()}` que continha underscores (_).
-    // O MP rejeita underscore no local-part do email gerado pelo buildPayerEmail → erro 4050.
-    // randomUUID() gera UUID puro; buildPayerEmail remove apenas os hifens → email limpo.
     const mpExternalRef = randomUUID();
 
     try {
