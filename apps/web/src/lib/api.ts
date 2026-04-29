@@ -55,12 +55,26 @@ export async function login(email: string, password: string) {
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
+export interface LowStockProduct {
+  id: string;
+  name: string;
+  stock: number | null;
+}
+
 export async function getDashboard(): Promise<{
   stats: DashboardStats;
   recentPayments: RecentPaymentItem[];
+  lowStockProducts: LowStockProduct[];
 }> {
-  const res = await api.get<ApiResponse<{ stats: DashboardStats; recentPayments: RecentPaymentItem[] }>>(
+  const res = await api.get<ApiResponse<{ stats: DashboardStats; recentPayments: RecentPaymentItem[]; lowStockProducts: LowStockProduct[] }>>(
     '/admin/dashboard'
+  );
+  return data(res);
+}
+
+export async function getDashboardChart(days = 30): Promise<{ date: string; revenue: number }[]> {
+  const res = await api.get<ApiResponse<{ date: string; revenue: number }[]>>(
+    `/admin/dashboard/chart?days=${days}`
   );
   return data(res);
 }
@@ -94,7 +108,7 @@ export async function deleteProduct(id: string): Promise<void> {
   await api.delete(`/admin/products/${id}`);
 }
 
-// ─── Reorder Products (drag-and-drop no painel admin) ────────────────────────
+// ─── Reorder Products ────────────────────────────────────────────────────────
 
 export async function reorderProducts(
   items: Array<{ id: string; sortOrder: number }>
@@ -102,7 +116,7 @@ export async function reorderProducts(
   await api.patch('/admin/products/reorder', { items });
 }
 
-// ─── Product Medias (usado em products-client.tsx) ────────────────────────────
+// ─── Product Medias ───────────────────────────────────────────────────────────
 
 export async function getProductMedias(productId: string): Promise<ProductMedia[]> {
   try {
@@ -121,9 +135,7 @@ export async function updateProductMedias(
 ): Promise<void> {
   try {
     await api.put(`/admin/products/${productId}/medias-config`, { medias });
-  } catch {
-    // não bloqueia o salvamento se a rota não estiver disponível
-  }
+  } catch {}
 }
 
 export async function uploadMediaFile(
@@ -193,7 +205,65 @@ export async function reprocessPayment(
   return res.data;
 }
 
-// ─── Delivery Medias (por pedido) ─────────────────────────────────────────────
+// ─── CSV exports ──────────────────────────────────────────────────────────────
+
+export function getPaymentsExportUrl(params?: {
+  status?: string;
+  productId?: string;
+  startDate?: string;
+  endDate?: string;
+}): string {
+  const base = '/api/proxy/admin/payments/export/csv';
+  if (!params) return base;
+  const q = new URLSearchParams();
+  if (params.status) q.set('status', params.status);
+  if (params.productId) q.set('productId', params.productId);
+  if (params.startDate) q.set('startDate', params.startDate);
+  if (params.endDate) q.set('endDate', params.endDate);
+  const qs = q.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+export function getUsersExportUrl(): string {
+  return '/api/proxy/admin/users/export/csv';
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+export async function getUsers(
+  params?: Partial<{ page: number; perPage: number; search: string }>
+): Promise<ApiResponse<PaginatedResponse<TelegramUserDTO & { totalSpent: number }>>> {
+  const res = await api.get('/admin/users', { params });
+  return res.data;
+}
+
+export async function getUser(id: string) {
+  const res = await api.get(`/admin/users/${id}`);
+  return res.data;
+}
+
+export async function toggleBlockUser(id: string): Promise<{ isBlocked: boolean; message: string }> {
+  const res = await api.patch(`/admin/users/${id}/block-toggle`);
+  return res.data.data;
+}
+
+// ─── Wallet ───────────────────────────────────────────────────────────────────
+
+export async function getWalletBalance(userId: string) {
+  const res = await api.get(`/admin/wallet/${userId}/balance`);
+  return res.data.data;
+}
+
+export async function adjustWalletBalance(
+  userId: string,
+  amount: number,
+  justification: string
+) {
+  const res = await api.post(`/admin/wallet/${userId}/adjust`, { amount, justification });
+  return res.data.data;
+}
+
+// ─── Delivery Medias ──────────────────────────────────────────────────────────
 
 export async function getOrderMedias(orderId: string): Promise<DeliveryMediaDTO[]> {
   const res = await api.get<ApiResponse<DeliveryMediaDTO[]>>(
@@ -211,20 +281,6 @@ export async function createOrderMedia(
     mediaData
   );
   return data(res);
-}
-
-// ─── Users ────────────────────────────────────────────────────────────────────
-
-export async function getUsers(
-  params?: Partial<{ page: number; perPage: number; search: string }>
-): Promise<ApiResponse<PaginatedResponse<TelegramUserDTO & { totalSpent: number }>>> {
-  const res = await api.get('/admin/users', { params });
-  return res.data;
-}
-
-export async function getUser(id: string) {
-  const res = await api.get(`/admin/users/${id}`);
-  return res.data;
 }
 
 // ─── Me ───────────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 // routes/admin/payments.ts
+// NOVO: GET /export/csv — exporta pagamentos aprovados em CSV
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
@@ -100,6 +101,54 @@ adminPaymentsRouter.get(
   }
 );
 
+// GET /api/admin/payments/export/csv
+adminPaymentsRouter.get(
+  '/export/csv',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const { status, productId, startDate, endDate } = querySchema.parse(req.query);
+
+    const where: Prisma.PaymentWhereInput = {};
+    if (status && Object.values(PaymentStatus).includes(status as PaymentStatus)) {
+      where.status = status as PaymentStatus;
+    }
+    if (productId) where.productId = productId;
+    if (startDate || endDate) {
+      where.createdAt = {
+        ...(startDate ? { gte: new Date(startDate) } : {}),
+        ...(endDate ? { lte: new Date(endDate) } : {}),
+      };
+    }
+
+    const payments = await prisma.payment.findMany({
+      where,
+      include: {
+        product: { select: { name: true } },
+        telegramUser: { select: { firstName: true, username: true, telegramId: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5000, // limite de segurança
+    });
+
+    const header = 'id,produto,usuario,telegram_id,valor,status,criado_em,aprovado_em';
+    const rows = payments.map((p) => [
+      p.id,
+      p.product?.name ?? 'Depósito',
+      p.telegramUser?.firstName ?? '',
+      p.telegramUser?.telegramId ?? '',
+      Number(p.amount).toFixed(2),
+      p.status,
+      p.createdAt.toISOString(),
+      p.approvedAt?.toISOString() ?? '',
+    ].join(','));
+
+    const csv = [header, ...rows].join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="pagamentos.csv"');
+    res.send('\uFEFF' + csv);
+  }
+);
+
 // GET /api/admin/payments/:id
 adminPaymentsRouter.get(
   '/:id',
@@ -152,8 +201,6 @@ adminPaymentsRouter.get(
 );
 
 // POST /api/admin/payments/:id/reprocess
-// Consulta o MP via mercadoPagoService (token já configurado no env)
-// e força processApprovedPayment se o MP confirmar aprovação.
 adminPaymentsRouter.post(
   '/:id/reprocess',
   requireRole('ADMIN', 'SUPERADMIN'),
@@ -169,7 +216,6 @@ adminPaymentsRouter.post(
       return;
     }
 
-    // Se já aprovado no nosso banco, não reprocessa
     if (payment.status === 'APPROVED') {
       res.json({ success: true, message: 'Pagamento já está aprovado', alreadyApproved: true });
       return;
@@ -183,7 +229,6 @@ adminPaymentsRouter.post(
       return;
     }
 
-    // Consulta o status real no Mercado Pago
     let mpDetail: Awaited<ReturnType<typeof mercadoPagoService.getPaymentById>>;
     try {
       mpDetail = await mercadoPagoService.getPaymentById(payment.mercadoPagoId);
@@ -204,7 +249,6 @@ adminPaymentsRouter.post(
       return;
     }
 
-    // MP confirmou aprovação → dispara o fluxo completo de entrega
     try {
       await paymentService.processApprovedPayment(paymentId);
     } catch (err: any) {

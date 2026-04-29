@@ -1,6 +1,7 @@
 // routes/admin/dashboard.ts
 // FIX PROD: todas as queries isoladas com .catch() para evitar HTTP 500
-// quando o Prisma Client está desatualizado em relação ao banco de produção
+// NOVO: GET /chart — receita dos últimos 30 dias agrupada por dia
+// NOVO: GET /low-stock — produtos com ≤ 3 itens disponíveis
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { AuthenticatedRequest } from '../../middleware/auth';
@@ -14,7 +15,6 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOf7DaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    // Agrupa status num único groupBy
     const statusCounts = await prisma.payment.groupBy({
       by: ['status'],
       _count: { status: true },
@@ -24,13 +24,11 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       (statusCounts as Array<{ status: string; _count: { status: number } }>)
         .find((s) => s.status === status)?._count?.status ?? 0;
 
-    // Receita total
     const revenueResult = await prisma.payment.aggregate({
       where: { status: 'APPROVED' },
       _sum: { amount: true },
     }).catch(() => ({ _sum: { amount: 0 } }));
 
-    // Hoje
     const todayPayments = await prisma.payment
       .count({ where: { status: 'APPROVED', approvedAt: { gte: startOfToday } } })
       .catch(() => 0);
@@ -40,7 +38,6 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       _sum: { amount: true },
     }).catch(() => ({ _sum: { amount: 0 } }));
 
-    // Este mês
     const monthPayments = await prisma.payment
       .count({ where: { status: 'APPROVED', approvedAt: { gte: startOfMonth } } })
       .catch(() => 0);
@@ -50,7 +47,6 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       _sum: { amount: true },
     }).catch(() => ({ _sum: { amount: 0 } }));
 
-    // Falhas operacionais — tabelas podem não existir ainda
     const deliveriesFailedToday = await prisma.deliveryLog
       .count({ where: { status: 'FAILED', createdAt: { gte: startOfToday } } })
       .catch(() => 0);
@@ -63,7 +59,6 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       .count({ where: { status: 'FAILED' } })
       .catch(() => 0);
 
-    // Pagamentos recentes — sem include para evitar erro de schema desatualizado
     const recentPaymentsRaw = await prisma.payment.findMany({
       where: { status: 'APPROVED', approvedAt: { gte: startOf7DaysAgo } },
       orderBy: { approvedAt: 'desc' },
@@ -75,6 +70,18 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
         approvedAt: true,
         productId: true,
       },
+    }).catch(() => []);
+
+    // Produtos com estoque baixo (≤ 3 itens disponíveis FIFO ou stock numérico)
+    const lowStockProducts = await prisma.product.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { stock: { lte: 3, gt: 0 } },
+          { stock: 0 },
+        ],
+      },
+      select: { id: true, name: true, stock: true },
     }).catch(() => []);
 
     res.json({
@@ -110,10 +117,47 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
           productName: p.productId ? 'Produto' : 'Depósito de Saldo',
           userName:    'Usuário',
         })),
+        lowStockProducts,
       },
     });
   } catch (err) {
     console.error('[dashboard] Erro inesperado:', err);
     res.status(500).json({ success: false, error: 'Erro ao carregar dashboard' });
+  }
+});
+
+// GET /api/admin/dashboard/chart?days=30
+// Retorna receita agrupada por dia nos últimos N dias
+adminDashboardRouter.get('/chart', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const days = Math.min(Number(req.query.days ?? 30), 90);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const payments = await prisma.payment.findMany({
+      where: { status: 'APPROVED', approvedAt: { gte: since } },
+      select: { amount: true, approvedAt: true },
+      orderBy: { approvedAt: 'asc' },
+    });
+
+    // Agrupa por data (YYYY-MM-DD) em memória — compatível com Neon/Postgres
+    const byDay: Record<string, number> = {};
+    for (const p of payments) {
+      if (!p.approvedAt) continue;
+      const key = p.approvedAt.toISOString().slice(0, 10);
+      byDay[key] = (byDay[key] ?? 0) + Number(p.amount);
+    }
+
+    // Preenche dias sem vendas com 0
+    const result: { date: string; revenue: number }[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const key = d.toISOString().slice(0, 10);
+      result.push({ date: key, revenue: byDay[key] ?? 0 });
+    }
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('[dashboard/chart] Erro:', err);
+    res.status(500).json({ success: false, error: 'Erro ao carregar gráfico' });
   }
 });

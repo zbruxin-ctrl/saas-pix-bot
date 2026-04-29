@@ -1,24 +1,33 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getDashboard } from '@/lib/api';
+import { getDashboard, getDashboardChart, type LowStockProduct } from '@/lib/api';
 import type { DashboardStats, RecentPaymentItem } from '@saas-pix/shared';
 import StatsCard from '@/components/admin/StatsCard';
 import RecentPaymentsTable from '@/components/admin/RecentPaymentsTable';
+import RevenueChart from '@/components/admin/RevenueChart';
 
 interface DashboardData {
   stats: DashboardStats;
   recentPayments: RecentPaymentItem[];
+  lowStockProducts: LowStockProduct[];
 }
 
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [chartData, setChartData] = useState<{ date: string; revenue: number }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    getDashboard()
-      .then(setData)
+    Promise.all([
+      getDashboard(),
+      getDashboardChart(30),
+    ])
+      .then(([dash, chart]) => {
+        setData(dash);
+        setChartData(chart);
+      })
       .catch(() => setError('Erro ao carregar dashboard'))
       .finally(() => setLoading(false));
   }, []);
@@ -39,15 +48,36 @@ export default function DashboardPage() {
     );
   }
 
-  const { stats, recentPayments } = data!;
+  const { stats, recentPayments, lowStockProducts } = data!;
 
   return (
     <div className="space-y-6">
-      {/* Título */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
         <p className="text-gray-500 text-sm mt-1">Visão geral do sistema</p>
       </div>
+
+      {/* Alerta de estoque baixo */}
+      {lowStockProducts.length > 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-yellow-600 text-lg">⚠️</span>
+            <span className="font-semibold text-yellow-800">Estoque baixo</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {lowStockProducts.map((p) => (
+              <a
+                key={p.id}
+                href="/admin/products"
+                className="inline-flex items-center gap-1 text-sm bg-yellow-100 hover:bg-yellow-200 text-yellow-800 px-3 py-1 rounded-full transition-colors"
+              >
+                <span>{p.name}</span>
+                <span className="font-bold">({p.stock ?? 0} restantes)</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Cards de estatísticas */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -81,7 +111,6 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Segunda linha de cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatsCard
           title="Aprovados"
@@ -109,6 +138,9 @@ export default function DashboardPage() {
           color="blue"
         />
       </div>
+
+      {/* Gráfico de receita dos últimos 30 dias */}
+      <RevenueChart data={chartData} />
 
       {/* Tabela de pagamentos recentes */}
       <div className="card">

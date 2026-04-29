@@ -5,6 +5,7 @@
 // FEATURE 4: escolha de método de pagamento (BALANCE | PIX | MIXED)
 // PERF #3: Promise.all para buscar produto + saldo em paralelo (era sequencial)
 // PERF #7: limpeza de sessões idle antigas a cada 30min (evita vazamento de memória)
+// FEATURE 5: /meus_pedidos com histórico real via API
 // FIX WEBHOOK: bot registra handleUpdate na API via HTTP — sem import cruzado
 // FIX TS7016: removido node-fetch, usa fetch nativo do Node 20
 
@@ -49,8 +50,8 @@ function getSession(userId: number): UserSession {
 }
 
 // PERF #7: limpa sessões idle com mais de 1h a cada 30min
-const SESSION_MAX_IDLE_MS = 60 * 60_000;    // 1 hora
-const SESSION_CLEANUP_INTERVAL_MS = 30 * 60_000; // 30 minutos
+const SESSION_MAX_IDLE_MS = 60 * 60_000;
+const SESSION_CLEANUP_INTERVAL_MS = 30 * 60_000;
 
 function cleanupSessions(): void {
   const now = Date.now();
@@ -124,6 +125,7 @@ bot.command('start', async (ctx) => {
     Markup.inlineKeyboard([
       [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
       [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
+      [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
       [Markup.button.callback('❓ Ajuda', 'show_help')],
     ])
   );
@@ -131,17 +133,11 @@ bot.command('start', async (ctx) => {
   getSession(userId).mainMessageId = sent.message_id;
 });
 
-// ─── /produtos e /ajuda ────────────────────────────────────────────────
+// ─── /produtos, /ajuda e /meus_pedidos ────────────────────────────────
 
 bot.command('produtos', async (ctx) => { await showProducts(ctx); });
 bot.command('ajuda', async (ctx) => { await showHelp(ctx); });
-bot.command('meus_pedidos', async (ctx) => {
-  await ctx.replyWithMarkdown(
-    `📋 *Meus Pedidos*\n\n` +
-    `Para verificar seus pedidos ou relatar algum problema, entre em contato com nosso suporte.\n\n` +
-    `Em caso de dúvidas sobre pagamentos, envie o *ID do pagamento* que recebeu.`
-  );
-});
+bot.command('meus_pedidos', async (ctx) => { await showOrders(ctx); });
 
 // ─── Actions de navegação ───────────────────────────────────────────────
 
@@ -153,6 +149,11 @@ bot.action('show_products', async (ctx) => {
 bot.action('show_help', async (ctx) => {
   await ctx.answerCbQuery();
   await showHelp(ctx);
+});
+
+bot.action('show_orders', async (ctx) => {
+  await ctx.answerCbQuery('📦 Carregando pedidos...');
+  await showOrders(ctx);
 });
 
 // ─── Saldo ───────────────────────────────────────────────────────────
@@ -349,6 +350,7 @@ async function executePayment(
           reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('🏠 Menu Principal', 'show_products')],
             [Markup.button.callback('💰 Ver Saldo', 'show_balance')],
+            [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
           ]).reply_markup,
         }
       );
@@ -474,6 +476,7 @@ bot.action(/^check_payment_(.+)$/, async (ctx) => {
         : {
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('🏠 Menu Principal', 'show_products')],
+              [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
             ]).reply_markup,
           }
     );
@@ -577,6 +580,7 @@ bot.on(message('text'), async (ctx) => {
     Markup.inlineKeyboard([
       [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
       [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
+      [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
       [Markup.button.callback('\u2753 Ajuda', 'show_help')],
     ])
   );
@@ -605,6 +609,7 @@ async function showProducts(ctx: Context): Promise<void> {
     });
 
     buttons.push([Markup.button.callback('💰 Meu Saldo', 'show_balance')]);
+    buttons.push([Markup.button.callback('📦 Meus Pedidos', 'show_orders')]);
     buttons.push([Markup.button.callback('\u2753 Ajuda', 'show_help')]);
 
     await editOrReply(
@@ -626,6 +631,73 @@ async function showProducts(ctx: Context): Promise<void> {
   }
 }
 
+async function showOrders(ctx: Context): Promise<void> {
+  const userId = ctx.from!.id;
+  try {
+    const orders = await apiClient.getOrders(String(userId));
+
+    if (!orders || orders.length === 0) {
+      await editOrReply(
+        ctx,
+        `📦 *Meus Pedidos*\n\n_Você ainda não fez nenhum pedido._\n\nCompre um produto e ele aparecerá aqui!`,
+        {
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
+          ]).reply_markup,
+        }
+      );
+      return;
+    }
+
+    const statusEmoji: Record<string, string> = {
+      DELIVERED: '✅',
+      PENDING: '⏳',
+      FAILED: '❌',
+      PROCESSING: '🔄',
+    };
+
+    const lines = orders.slice(0, 10).map((o: {
+      productName: string;
+      status: string;
+      createdAt: string;
+    }) => {
+      const emoji = statusEmoji[o.status] ?? '📦';
+      const date = new Date(o.createdAt).toLocaleDateString('pt-BR', {
+        day: '2-digit', month: '2-digit', year: '2-digit',
+        timeZone: 'America/Sao_Paulo',
+      });
+      return `${emoji} *${o.productName}* — ${date}`;
+    });
+
+    const total = orders.length;
+    const hasMore = total > 10;
+
+    await editOrReply(
+      ctx,
+      `📦 *Meus Pedidos* (${total} no total)\n\n${lines.join('\n')}${hasMore ? `\n\n_...e mais ${total - 10} pedidos anteriores._` : ''}\n\n` +
+      `_Para suporte sobre um pedido específico, entre em contato informando o nome do produto e a data._`,
+      {
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+        ]).reply_markup,
+      }
+    );
+  } catch (err) {
+    logger.error(`Erro ao buscar pedidos para ${userId}:`, err);
+    await editOrReply(
+      ctx,
+      '\u274c Erro ao buscar seus pedidos. Tente novamente.',
+      {
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Tentar Novamente', 'show_orders')],
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+        ]).reply_markup,
+      }
+    );
+  }
+}
+
 async function showHelp(ctx: Context): Promise<void> {
   await editOrReply(
     ctx,
@@ -633,6 +705,7 @@ async function showHelp(ctx: Context): Promise<void> {
     `*Comandos disponíveis:*\n` +
     `\u2022 /start \u2014 Tela inicial\n` +
     `\u2022 /produtos \u2014 Ver produtos\n` +
+    `\u2022 /meus_pedidos \u2014 Histórico de pedidos\n` +
     `\u2022 /ajuda \u2014 Esta mensagem\n\n` +
     `*Como funciona?*\n` +
     `1. Escolha um produto\n` +
@@ -660,8 +733,6 @@ bot.catch((err, ctx) => {
 });
 
 // ─── Inicialização ────────────────────────────────────────────────────
-// Produção: webhook no Telegram + notifica API via fetch nativo (Node 20).
-// Desenvolvimento: polling.
 
 async function startBot(): Promise<void> {
   if (env.NODE_ENV === 'production' && env.BOT_WEBHOOK_URL) {
