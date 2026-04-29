@@ -23,6 +23,15 @@ const METHOD_OPTIONS = [
   { value: 'MIXED', label: '🔀 Saldo + PIX' },
 ];
 
+function toISODate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function getToday() { return toISODate(new Date()); }
+function getLast7Days() { const d = new Date(); d.setDate(d.getDate() - 6); return toISODate(d); }
+function getLast30Days() { const d = new Date(); d.setDate(d.getDate() - 29); return toISODate(d); }
+function getThisMonthStart() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; }
+
 function getProductLabel(p: PaymentDTO): string {
   if (p.product?.name) return p.product.name;
   return '💰 Saldo';
@@ -50,19 +59,47 @@ export default function PaymentsPage() {
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('');
   const [method, setMethod] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [page, setPage] = useState(1);
+
+  // Receita total dos resultados filtrados (apenas APPROVED)
+  const totalRevenue = result?.data
+    .filter((p) => p.status === 'APPROVED')
+    .reduce((acc, p) => acc + Number(p.amount), 0) ?? 0;
+
+  const hasDateFilter = startDate || endDate;
+
+  function clearDates() {
+    setStartDate('');
+    setEndDate('');
+    setPage(1);
+  }
+
+  function applyShortcut(start: string, end: string) {
+    setStartDate(start);
+    setEndDate(end);
+    setPage(1);
+  }
 
   const fetchPayments = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getPayments({ page, status: status || undefined, search: search || undefined, method: method || undefined });
+      const res = await getPayments({
+        page,
+        status: status || undefined,
+        search: search || undefined,
+        method: method || undefined,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+      });
       setResult(res.data ?? null);
     } catch {
       //
     } finally {
       setLoading(false);
     }
-  }, [page, status, search, method]);
+  }, [page, status, search, method, startDate, endDate]);
 
   useEffect(() => {
     const t = setTimeout(fetchPayments, 300);
@@ -74,12 +111,13 @@ export default function PaymentsPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Pagamentos</h1>
         <p className="text-gray-500 text-sm mt-1">
-          {result ? `${result.total} pagamentos encontrados` : 'Carregando...'}
+          {result ? `${result.total} pagamento${result.total !== 1 ? 's' : ''} encontrado${result.total !== 1 ? 's' : ''}` : 'Carregando...'}
         </p>
       </div>
 
       {/* Filtros */}
-      <div className="card">
+      <div className="card space-y-3">
+        {/* Linha 1: busca + status + método */}
         <div className="flex flex-col sm:flex-row gap-3">
           <input
             className="input flex-1"
@@ -106,7 +144,100 @@ export default function PaymentsPage() {
             ))}
           </select>
         </div>
+
+        {/* Linha 2: filtro de período */}
+        <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+          <div className="flex items-center gap-2 flex-1">
+            <label className="text-sm font-medium text-gray-600 whitespace-nowrap">Período:</label>
+            <input
+              type="date"
+              className="input flex-1 sm:max-w-[160px]"
+              value={startDate}
+              max={endDate || getToday()}
+              onChange={(e) => { setStartDate(e.target.value); setPage(1); }}
+              title="Data inicial"
+            />
+            <span className="text-gray-400 text-sm">até</span>
+            <input
+              type="date"
+              className="input flex-1 sm:max-w-[160px]"
+              value={endDate}
+              min={startDate}
+              max={getToday()}
+              onChange={(e) => { setEndDate(e.target.value); setPage(1); }}
+              title="Data final"
+            />
+            {hasDateFilter && (
+              <button
+                onClick={clearDates}
+                className="text-gray-400 hover:text-red-500 text-lg leading-none px-1 transition-colors"
+                title="Limpar datas"
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          {/* Atalhos rápidos */}
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => applyShortcut(getToday(), getToday())}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                startDate === getToday() && endDate === getToday()
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              Hoje
+            </button>
+            <button
+              onClick={() => applyShortcut(getLast7Days(), getToday())}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                startDate === getLast7Days() && endDate === getToday()
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              7 dias
+            </button>
+            <button
+              onClick={() => applyShortcut(getLast30Days(), getToday())}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                startDate === getLast30Days() && endDate === getToday()
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              30 dias
+            </button>
+            <button
+              onClick={() => applyShortcut(getThisMonthStart(), getToday())}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                startDate === getThisMonthStart() && endDate === getToday()
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              Este mês
+            </button>
+          </div>
+        </div>
       </div>
+
+      {/* Resumo de receita filtrada */}
+      {result && result.data.length > 0 && (
+        <div className="flex items-center gap-4 px-1">
+          <div className="text-sm text-gray-500">
+            Receita aprovada nesta página:
+            <span className="ml-1 font-semibold text-green-700">{formatCurrency(totalRevenue)}</span>
+          </div>
+          {hasDateFilter && (
+            <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+              🗓 Filtro de data ativo
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Tabela */}
       <div className="card p-0 overflow-hidden">
@@ -133,7 +264,14 @@ export default function PaymentsPage() {
               ) : result?.data.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="text-center py-12 text-gray-400">
-                    Nenhum pagamento encontrado
+                    <div className="text-3xl mb-2">📭</div>
+                    <p className="font-medium text-gray-500">Nenhum pagamento encontrado</p>
+                    {hasDateFilter && (
+                      <p className="text-xs mt-1">
+                        Tente um período diferente ou{' '}
+                        <button onClick={clearDates} className="text-blue-600 underline">limpe o filtro de data</button>
+                      </p>
+                    )}
                   </td>
                 </tr>
               ) : (
