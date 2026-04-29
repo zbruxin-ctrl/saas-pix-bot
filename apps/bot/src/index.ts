@@ -14,6 +14,9 @@
 // FIX #4: removido tipo inline no .map() de showOrders — usa OrderSummary diretamente
 // FIX #5: bot.telegram.getMe() após setWebhook — popula botInfo em modo webhook
 // FIX #8: bot expõe servidor HTTP próprio (Express) — Telegram bate direto no bot, sem intermediário da API
+// FIX #9: showProducts sem botões extras (Saldo/Pedidos/Ajuda removidos da lista de produtos)
+// FIX #10: showHelp usa texto simples sem markdown problemático — corrige crash do botão Ajuda
+// FIX #11: todos os botões "Voltar" agora vão para show_home (menu inicial do /start), não show_products
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -43,6 +46,7 @@ interface UserSession {
   paymentId?: string;
   products?: ProductDTO[];
   mainMessageId?: number;
+  firstName?: string;
   lastActivityAt: number;
 }
 
@@ -117,13 +121,36 @@ async function editOrReply(
   session.mainMessageId = sent.message_id;
 }
 
+// ─── Helper: renderiza o menu inicial (mesmo conteúdo do /start) ──────
+async function showHome(ctx: Context): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = getSession(userId);
+  const firstName = session.firstName || ctx.from?.first_name || 'visitante';
+
+  await editOrReply(
+    ctx,
+    `👋 Olá, *${firstName}*! Bem-vindo!\n\n` +
+    `🛒 Aqui você pode adquirir nossos produtos e planos de forma rápida e segura.\n\n` +
+    `💳 Aceitamos pagamento via *PIX* (confirmação instantânea) ou via *saldo* pré-carregado.\n\n` +
+    `Para ver nossos produtos, clique no botão abaixo:`,
+    {
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
+        [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
+        [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
+        [Markup.button.callback('❓ Ajuda', 'show_help')],
+      ]).reply_markup,
+    }
+  );
+}
+
 // ─── /start ──────────────────────────────────────────────────────────
 
 bot.command('start', async (ctx) => {
   const firstName = ctx.from?.first_name || 'visitante';
   const userId = ctx.from!.id;
 
-  sessions.set(userId, { step: 'idle', mainMessageId: undefined, lastActivityAt: Date.now() });
+  sessions.set(userId, { step: 'idle', mainMessageId: undefined, firstName, lastActivityAt: Date.now() });
 
   const sent = await ctx.replyWithMarkdown(
     `👋 Olá, *${firstName}*! Bem-vindo!\n\n` +
@@ -148,6 +175,12 @@ bot.command('ajuda', async (ctx) => { await showHelp(ctx); });
 bot.command('meus_pedidos', async (ctx) => { await showOrders(ctx); });
 
 // ─── Actions de navegação ───────────────────────────────────────────────
+
+// FIX #11: show_home leva de volta ao menu inicial (igual ao /start)
+bot.action('show_home', async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHome(ctx);
+});
 
 bot.action('show_products', async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produtos...');
@@ -189,7 +222,7 @@ bot.action('show_balance', async (ctx) => {
     await editOrReply(ctx, texto, {
       reply_markup: Markup.inlineKeyboard([
         [Markup.button.callback('\u2795 Adicionar Saldo', 'deposit_balance')],
-        [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+        [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
       ]).reply_markup,
     });
   } catch (err) {
@@ -316,6 +349,7 @@ async function showPaymentMethodScreen(
     ]);
   }
 
+  // FIX #11: Voltar na tela de produto vai para a lista de produtos
   buttons.push([Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')]);
 
   await editOrReply(ctx, confirmMessage, {
@@ -356,8 +390,7 @@ async function executePayment(
         `Seu produto será entregue em instantes! 🚀`,
         {
           reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('🏠 Menu Principal', 'show_products')],
-            [Markup.button.callback('💰 Ver Saldo', 'show_balance')],
+            [Markup.button.callback('🏠 Menu Inicial', 'show_home')],
             [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
           ]).reply_markup,
         }
@@ -377,7 +410,6 @@ async function executePayment(
       ? `\n💳 *Saldo usado:* R$ ${Number(payment.balanceUsed).toFixed(2)}\n📱 *PIX a pagar:* R$ ${Number(payment.pixAmount).toFixed(2)}`
       : '';
 
-    // FIX #3: PIX consolidado — QR Code + copia-e-cola em única mensagem (caption)
     const qrBuffer = Buffer.from(payment.pixQrCode, 'base64');
     const caption =
       `💳 *Pagamento PIX Gerado!*\n\n` +
@@ -387,7 +419,6 @@ async function executePayment(
       `🪪 *ID:* \`${payment.paymentId}\`\n\n` +
       `📋 *Copia e Cola:*\n\`${payment.pixQrCodeText}\``;
 
-    // Apaga a mensagem principal de "processando" e envia o QR Code como nova âncora
     const chatId = ctx.chat?.id;
     if (chatId && session.mainMessageId) {
       await ctx.telegram.deleteMessage(chatId, session.mainMessageId).catch(() => {});
@@ -407,7 +438,6 @@ async function executePayment(
     );
 
     session.mainMessageId = qrMsg.message_id;
-
     logger.info(`[${paymentMethod}] PIX gerado para usuário ${userId} | Pagamento: ${payment.paymentId}`);
 
   } catch (error) {
@@ -490,7 +520,7 @@ bot.action(/^check_payment_(.+)$/, async (ctx) => {
           }
         : {
             reply_markup: Markup.inlineKeyboard([
-              [Markup.button.callback('🏠 Menu Principal', 'show_products')],
+              [Markup.button.callback('🏠 Menu Inicial', 'show_home')],
               [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
             ]).reply_markup,
           }
@@ -520,8 +550,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
     '\u274c *Pagamento cancelado.*\n\nVolte quando quiser!',
     {
       reply_markup: Markup.inlineKeyboard([
-        [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
-        [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
+        [Markup.button.callback('🏠 Menu Inicial', 'show_home')],
       ]).reply_markup,
     }
   );
@@ -562,7 +591,6 @@ bot.on(message('text'), async (ctx) => {
         hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo',
       });
 
-      // FIX #3 aplicado também ao depósito
       const qrBuffer = Buffer.from(deposit.pixQrCode, 'base64');
       await ctx.replyWithPhoto(
         { source: qrBuffer },
@@ -604,6 +632,7 @@ bot.on(message('text'), async (ctx) => {
 
 // ─── Funções auxiliares ───────────────────────────────────────────────
 
+// FIX #9: menu de produtos mostra APENAS os produtos — sem botões extras
 async function showProducts(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   const session = getSession(userId);
@@ -614,7 +643,11 @@ async function showProducts(ctx: Context): Promise<void> {
     session.products = products;
 
     if (products.length === 0) {
-      await editOrReply(ctx, '😔 Nenhum produto disponível no momento. Volte em breve!');
+      await editOrReply(ctx, '😔 Nenhum produto disponível no momento. Volte em breve!', {
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
+        ]).reply_markup,
+      });
       return;
     }
 
@@ -624,13 +657,12 @@ async function showProducts(ctx: Context): Promise<void> {
       return [Markup.button.callback(label, `select_product_${p.id}`)];
     });
 
-    buttons.push([Markup.button.callback('💰 Meu Saldo', 'show_balance')]);
-    buttons.push([Markup.button.callback('📦 Meus Pedidos', 'show_orders')]);
-    buttons.push([Markup.button.callback('\u2753 Ajuda', 'show_help')]);
+    // FIX #11: Voltar na lista de produtos vai pro menu inicial
+    buttons.push([Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')]);
 
     await editOrReply(
       ctx,
-      `🛍️ *Nossos Produtos*\n\nEscolha uma opção abaixo:`,
+      `🛍️ *Nossos Produtos*\n\nEscolha um produto abaixo:`,
       { reply_markup: Markup.inlineKeyboard(buttons).reply_markup }
     );
   } catch (error) {
@@ -641,6 +673,7 @@ async function showProducts(ctx: Context): Promise<void> {
       {
         reply_markup: Markup.inlineKeyboard([
           [Markup.button.callback('🔄 Tentar Novamente', 'show_products')],
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
         ]).reply_markup,
       }
     );
@@ -659,6 +692,7 @@ async function showOrders(ctx: Context): Promise<void> {
         {
           reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
+            [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
           ]).reply_markup,
         }
       );
@@ -672,7 +706,6 @@ async function showOrders(ctx: Context): Promise<void> {
       PROCESSING: '🔄',
     };
 
-    // FIX #2 + #4: usa OrderSummary diretamente (sem tipo inline)
     const lines = orders.slice(0, 10).map((o: OrderSummary) => {
       const emoji = statusEmoji[o.status] ?? '📦';
       const date = new Date(o.createdAt).toLocaleDateString('pt-BR', {
@@ -699,8 +732,7 @@ async function showOrders(ctx: Context): Promise<void> {
       `_Para suporte sobre um pedido específico, entre em contato informando o nome do produto e a data._`,
       {
         reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('🛍️ Ver Produtos', 'show_products')],
-          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
         ]).reply_markup,
       }
     );
@@ -712,39 +744,39 @@ async function showOrders(ctx: Context): Promise<void> {
       {
         reply_markup: Markup.inlineKeyboard([
           [Markup.button.callback('🔄 Tentar Novamente', 'show_orders')],
-          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+          [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
         ]).reply_markup,
       }
     );
   }
 }
 
+// FIX #10: showHelp sem caracteres markdown problemáticos (—, /, etc escapados)
 async function showHelp(ctx: Context): Promise<void> {
-  // FIX #1: número de suporte via variável de ambiente (sem hardcode)
   const supportUrl = `https://wa.me/${env.SUPPORT_PHONE}`;
 
   await editOrReply(
     ctx,
-    `\u2753 *Central de Ajuda*\n\n` +
+    `❓ *Central de Ajuda*\n\n` +
     `*Comandos disponíveis:*\n` +
-    `\u2022 /start \u2014 Tela inicial\n` +
-    `\u2022 /produtos \u2014 Ver produtos\n` +
-    `\u2022 /meus_pedidos \u2014 Histórico de pedidos\n` +
-    `\u2022 /ajuda \u2014 Esta mensagem\n\n` +
+    `/start \u2014 Tela inicial\n` +
+    `/produtos \u2014 Ver produtos\n` +
+    `/meus\\_pedidos \u2014 Histórico de pedidos\n` +
+    `/ajuda \u2014 Esta mensagem\n\n` +
     `*Como funciona?*\n` +
-    `1. Escolha um produto\n` +
-    `2. Escolha como pagar: saldo, PIX ou os dois\n` +
-    `3. Receba seu acesso automaticamente \u2705\n\n` +
-    `*Saldo pré-pago:*\n` +
-    `Faça um depósito uma vez e use para várias compras sem gerar PIX a cada vez.\n\n` +
-    `*Modo Saldo + PIX:*\n` +
-    `Seu saldo cobre parte do valor e você paga o restante via PIX!\n\n` +
+    `1\\. Escolha um produto\n` +
+    `2\\. Escolha como pagar: saldo, PIX ou os dois\n` +
+    `3\\. Receba seu acesso automaticamente \u2705\n\n` +
+    `*Saldo pré\\-pago:*\n` +
+    `Faça um depósito uma vez e use para várias compras sem gerar PIX a cada vez\\.\n\n` +
+    `*Modo Saldo \\+ PIX:*\n` +
+    `Seu saldo cobre parte do valor e você paga o restante via PIX\\!\n\n` +
     `*Problemas com pagamento?*\n` +
-    `Entre em contato com nosso suporte informando o ID do pagamento.`,
+    `Entre em contato informando o ID do pagamento\\.`,
     {
       reply_markup: Markup.inlineKeyboard([
         [Markup.button.url('📞 Contatar Suporte', supportUrl)],
-        [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')],
+        [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
       ]).reply_markup,
     }
   );
@@ -757,10 +789,6 @@ bot.catch((err, ctx) => {
 });
 
 // ─── FIX #8: servidor HTTP próprio do bot ────────────────────────────
-// O bot sobe um Express na porta 8080 e recebe os updates do Telegram diretamente.
-// Isso elimina a dependência do intermediário da API (que rodava em container separado
-// e nunca compartilhava memória com o bot — o _handler ficava null para sempre).
-// BOT_WEBHOOK_URL deve apontar para a URL pública deste container (bot), não da API.
 
 async function startBot(): Promise<void> {
   if (env.NODE_ENV === 'production' && env.BOT_WEBHOOK_URL) {
@@ -768,17 +796,14 @@ async function startBot(): Promise<void> {
     const webhookPath = '/telegram-webhook';
     const webhookUrl = `${env.BOT_WEBHOOK_URL}${webhookPath}`;
 
-    // Registra o webhook no Telegram apontando para este container
     await bot.telegram.setWebhook(webhookUrl, {
       secret_token: env.TELEGRAM_BOT_SECRET,
     });
     logger.info(`🤖 Webhook registrado no Telegram: ${webhookUrl}`);
 
-    // Popula botInfo (necessário em modo webhook — Telegraf não faz isso automaticamente)
     const me = await bot.telegram.getMe();
     logger.info(`📌 Bot username: @${me.username}`);
 
-    // Sobe o servidor HTTP para receber os updates
     const app = express();
     app.use(express.json());
 
@@ -803,7 +828,6 @@ async function startBot(): Promise<void> {
     });
 
   } else {
-    // Modo desenvolvimento: polling (sem necessidade de URL pública)
     await bot.launch();
     logger.info(`📌 Bot username: @${bot.botInfo?.username}`);
     logger.info('🤖 Bot iniciado em modo POLLING (desenvolvimento)');
