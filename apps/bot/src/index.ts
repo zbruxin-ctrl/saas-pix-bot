@@ -21,6 +21,7 @@
 // FIX #12: showHelp usa Markdown simples (sem escapes MarkdownV2) — remove barras inversas
 // FIX #13: escapeMd() em todos os campos dinâmicos — corrige Bad Request: can't parse entities
 // FIX #14: removidos \_ e \- do showHelp — Markdown v1 não suporta escape de caracteres
+// FIX #15: showHelp migrado para HTML — o _ em /meus_pedidos não é especial em HTML
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -43,10 +44,16 @@ const logger = winston.createLogger({
 });
 
 // ─── Escape Markdown v1 (evita Bad Request: can't parse entities) ──────
-// Escapa apenas os caracteres que o Markdown v1 do Telegram interpreta:
-// _ * ` [
 function escapeMd(text: string): string {
   return String(text ?? '').replace(/[_*`[]/g, '\\$&');
+}
+
+// ─── Escape HTML (para funções que usam parse_mode HTML) ───────────────
+function escapeHtml(text: string): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // ─── Sessão em memória ─────────────────────────────────────────────────
@@ -72,7 +79,6 @@ function getSession(userId: number): UserSession {
   return session;
 }
 
-// PERF #7: limpa sessões idle com mais de 1h a cada 30min
 const SESSION_MAX_IDLE_MS = 60 * 60_000;
 const SESSION_CLEANUP_INTERVAL_MS = 30 * 60_000;
 
@@ -96,7 +102,6 @@ setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL_MS);
 
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
 
-// ─── FEATURE 6: Registra o menu de comandos no Telegram ───────────────
 async function registerCommands(): Promise<void> {
   await bot.telegram.setMyCommands([
     { command: 'start',        description: '🏠 Menu inicial' },
@@ -144,7 +149,43 @@ async function editOrReply(
   session.mainMessageId = sent.message_id;
 }
 
-// ─── Helper: renderiza o menu inicial (mesmo conteúdo do /start) ──────
+// ─── Helper: editar mensagem principal com HTML ─────────────────────
+async function editOrReplyHtml(
+  ctx: Context,
+  text: string,
+  extra?: ExtraEditMessageText
+): Promise<void> {
+  const session = getSession(ctx.from!.id);
+  const chatId = ctx.chat?.id;
+  if (!chatId) {
+    await ctx.telegram.sendMessage(ctx.from!.id, text, { parse_mode: 'HTML', ...(extra as object) });
+    return;
+  }
+
+  if (session.mainMessageId) {
+    try {
+      await ctx.telegram.editMessageText(chatId, session.mainMessageId, undefined, text, {
+        parse_mode: 'HTML',
+        ...extra,
+      });
+      return;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (
+        !msg.includes('message is not modified') &&
+        !msg.includes('message to edit not found') &&
+        !msg.includes('MESSAGE_ID_INVALID')
+      ) {
+        logger.warn(`[editOrReplyHtml] Erro inesperado ao editar: ${msg}`);
+      }
+    }
+  }
+
+  const sent = await ctx.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', ...(extra as object) });
+  session.mainMessageId = sent.message_id;
+}
+
+// ─── Helper: menu inicial ────────────────────────────────────────
 async function showHome(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   const session = getSession(userId);
@@ -191,7 +232,7 @@ bot.command('start', async (ctx) => {
   getSession(userId).mainMessageId = sent.message_id;
 });
 
-// ─── /produtos, /saldo, /ajuda e /meus_pedidos ────────────────────────
+// ─── Comandos ───────────────────────────────────────────────────────────
 
 bot.command('produtos',     async (ctx) => { await showProducts(ctx); });
 bot.command('saldo',        async (ctx) => { await showBalance(ctx); });
@@ -274,7 +315,7 @@ bot.action('deposit_balance', async (ctx) => {
   );
 });
 
-// ─── Selecionar produto → tela de escolha de método ───────────────────
+// ─── Selecionar produto ─────────────────────────────────────────────
 
 bot.action(/^select_product_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produto...');
@@ -323,7 +364,7 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   await showPaymentMethodScreen(ctx, product, balanceResult);
 });
 
-// ─── Tela de escolha de método de pagamento ───────────────────────────
+// ─── Tela de método de pagamento ──────────────────────────────────────
 
 async function showPaymentMethodScreen(
   ctx: Context,
@@ -355,29 +396,14 @@ async function showPaymentMethodScreen(
   const buttons = [];
 
   if (balance >= price) {
-    buttons.push([
-      Markup.button.callback(
-        `💰 Só Saldo  (R$ ${price.toFixed(2)})`,
-        `pay_balance_${product.id}`
-      ),
-    ]);
+    buttons.push([Markup.button.callback(`💰 Só Saldo  (R$ ${price.toFixed(2)})`, `pay_balance_${product.id}`)]);
   }
 
-  buttons.push([
-    Markup.button.callback(
-      `📱 Só PIX  (R$ ${price.toFixed(2)})`,
-      `pay_pix_${product.id}`
-    ),
-  ]);
+  buttons.push([Markup.button.callback(`📱 Só PIX  (R$ ${price.toFixed(2)})`, `pay_pix_${product.id}`)]);
 
   if (balance > 0 && balance < price) {
     const pixDiff = (price - balance).toFixed(2);
-    buttons.push([
-      Markup.button.callback(
-        `🔀 Saldo + PIX  (saldo R$ ${balanceStr} + PIX R$ ${pixDiff})`,
-        `pay_mixed_${product.id}`
-      ),
-    ]);
+    buttons.push([Markup.button.callback(`🔀 Saldo + PIX  (saldo R$ ${balanceStr} + PIX R$ ${pixDiff})`, `pay_mixed_${product.id}`)]);
   }
 
   buttons.push([Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')]);
@@ -387,7 +413,7 @@ async function showPaymentMethodScreen(
   });
 }
 
-// ─── Helpers para executar o pagamento após escolha do método ─────────
+// ─── Executar pagamento ─────────────────────────────────────────────
 
 async function executePayment(
   ctx: Context,
@@ -431,9 +457,7 @@ async function executePayment(
 
     const expiresAt = new Date(payment.expiresAt);
     const expiresStr = expiresAt.toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo',
     });
 
     const mixedLine = payment.isMixed
@@ -504,7 +528,7 @@ async function executePayment(
   }
 }
 
-// ─── Actions de pagamento por método ──────────────────────────────────
+// ─── Actions de pagamento ─────────────────────────────────────────────
 
 bot.action(/^pay_balance_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('💰 Processando com saldo...');
@@ -521,7 +545,7 @@ bot.action(/^pay_mixed_(.+)$/, async (ctx) => {
   await executePayment(ctx, ctx.match[1], 'MIXED');
 });
 
-// ─── Verificar status do pagamento ─────────────────────────────────────
+// ─── Verificar pagamento ──────────────────────────────────────────────
 
 bot.action(/^check_payment_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('🔍 Verificando pagamento...');
@@ -560,7 +584,7 @@ bot.action(/^check_payment_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Cancelar pagamento ─────────────────────────────────────────────────
+// ─── Cancelar pagamento ───────────────────────────────────────────────
 
 bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('❌ Cancelando...');
@@ -586,7 +610,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   );
 });
 
-// ─── Handler de mensagens de texto ────────────────────────────────────
+// ─── Handler de texto ──────────────────────────────────────────────────
 
 bot.on(message('text'), async (ctx) => {
   const text = ctx.message.text;
@@ -779,27 +803,28 @@ async function showOrders(ctx: Context): Promise<void> {
   }
 }
 
+// FIX #15: showHelp usa HTML — o _ em /meus_pedidos nao e especial em HTML
 async function showHelp(ctx: Context): Promise<void> {
-  const supportUrl = `https://wa.me/${env.SUPPORT_PHONE}`;
+  const supportUrl = `https://wa.me/${escapeHtml(env.SUPPORT_PHONE)}`;
 
-  await editOrReply(
+  await editOrReplyHtml(
     ctx,
-    `❓ *Central de Ajuda*\n\n` +
-    `*Comandos disponíveis:*\n` +
+    `❓ <b>Central de Ajuda</b>\n\n` +
+    `<b>Comandos disponíveis:</b>\n` +
     `/start — Tela inicial\n` +
     `/produtos — Ver produtos\n` +
     `/saldo — Ver e adicionar saldo\n` +
     `/meus_pedidos — Histórico de pedidos\n` +
     `/ajuda — Esta mensagem\n\n` +
-    `*Como funciona?*\n` +
+    `<b>Como funciona?</b>\n` +
     `1. Escolha um produto\n` +
     `2. Escolha como pagar: saldo, PIX ou os dois\n` +
     `3. Receba seu acesso automaticamente ✅\n\n` +
-    `*Saldo pre-pago:*\n` +
+    `<b>Saldo pré-pago:</b>\n` +
     `Faça um depósito uma vez e use para várias compras sem gerar PIX a cada vez.\n\n` +
-    `*Modo Saldo + PIX:*\n` +
+    `<b>Modo Saldo + PIX:</b>\n` +
     `Seu saldo cobre parte do valor e você paga o restante via PIX!\n\n` +
-    `*Problemas com pagamento?*\n` +
+    `<b>Problemas com pagamento?</b>\n` +
     `Entre em contato informando o ID do pagamento.`,
     {
       reply_markup: Markup.inlineKeyboard([
@@ -816,7 +841,7 @@ bot.catch((err, ctx) => {
   logger.error(`Erro no bot para update ${ctx.update.update_id}:`, err);
 });
 
-// ─── FIX #8: servidor HTTP próprio do bot ────────────────────────────
+// ─── Servidor HTTP ────────────────────────────────────────────────────────
 
 async function startBot(): Promise<void> {
   if (env.NODE_ENV === 'production' && env.BOT_WEBHOOK_URL) {
