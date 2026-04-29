@@ -17,6 +17,7 @@
 // FIX #9: showProducts sem botões extras (Saldo/Pedidos/Ajuda removidos da lista de produtos)
 // FIX #10: showHelp usa texto simples sem markdown problemático — corrige crash do botão Ajuda
 // FIX #11: todos os botões "Voltar" agora vão para show_home (menu inicial do /start), não show_products
+// FEATURE 6: setMyCommands registra menu de comandos no Telegram (botão ☰ na caixa de texto)
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -84,6 +85,19 @@ setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL_MS);
 // ─── Bot ─────────────────────────────────────────────────────────────
 
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
+
+// ─── FEATURE 6: Registra o menu de comandos no Telegram ───────────────
+// Aparece como botão "☰" na caixa de texto — o usuário clica e vê os atalhos
+async function registerCommands(): Promise<void> {
+  await bot.telegram.setMyCommands([
+    { command: 'start',        description: '🏠 Menu inicial' },
+    { command: 'produtos',     description: '🛍️ Ver produtos disponíveis' },
+    { command: 'saldo',        description: '💰 Ver meu saldo e adicionar' },
+    { command: 'meus_pedidos', description: '📦 Histórico de pedidos' },
+    { command: 'ajuda',        description: '❓ Central de ajuda e suporte' },
+  ]);
+  logger.info('✅ Menu de comandos registrado no Telegram');
+}
 
 // ─── Helper: editar mensagem principal ou enviar nova se não existir ───
 async function editOrReply(
@@ -168,15 +182,15 @@ bot.command('start', async (ctx) => {
   getSession(userId).mainMessageId = sent.message_id;
 });
 
-// ─── /produtos, /ajuda e /meus_pedidos ────────────────────────────────
+// ─── /produtos, /saldo, /ajuda e /meus_pedidos ────────────────────────
 
-bot.command('produtos', async (ctx) => { await showProducts(ctx); });
-bot.command('ajuda', async (ctx) => { await showHelp(ctx); });
+bot.command('produtos',     async (ctx) => { await showProducts(ctx); });
+bot.command('saldo',        async (ctx) => { await showBalance(ctx); });
+bot.command('ajuda',        async (ctx) => { await showHelp(ctx); });
 bot.command('meus_pedidos', async (ctx) => { await showOrders(ctx); });
 
 // ─── Actions de navegação ───────────────────────────────────────────────
 
-// FIX #11: show_home leva de volta ao menu inicial (igual ao /start)
 bot.action('show_home', async (ctx) => {
   await ctx.answerCbQuery();
   await showHome(ctx);
@@ -199,8 +213,8 @@ bot.action('show_orders', async (ctx) => {
 
 // ─── Saldo ───────────────────────────────────────────────────────────
 
-bot.action('show_balance', async (ctx) => {
-  await ctx.answerCbQuery('⏳ Buscando saldo...');
+// Função reutilizável para exibir saldo (usada por action E por comando /saldo)
+async function showBalance(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   try {
     const { balance, transactions } = await apiClient.getBalance(String(userId));
@@ -227,8 +241,17 @@ bot.action('show_balance', async (ctx) => {
     });
   } catch (err) {
     logger.error(`Erro ao buscar saldo para ${userId}:`, err);
-    await ctx.answerCbQuery('Erro ao buscar saldo. Tente novamente.', { show_alert: true });
+    await editOrReply(ctx, '❌ Erro ao buscar saldo. Tente novamente.', {
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')],
+      ]).reply_markup,
+    });
   }
+}
+
+bot.action('show_balance', async (ctx) => {
+  await ctx.answerCbQuery('⏳ Buscando saldo...');
+  await showBalance(ctx);
 });
 
 bot.action('deposit_balance', async (ctx) => {
@@ -349,7 +372,6 @@ async function showPaymentMethodScreen(
     ]);
   }
 
-  // FIX #11: Voltar na tela de produto vai para a lista de produtos
   buttons.push([Markup.button.callback('\u25c0\ufe0f Voltar', 'show_products')]);
 
   await editOrReply(ctx, confirmMessage, {
@@ -632,7 +654,6 @@ bot.on(message('text'), async (ctx) => {
 
 // ─── Funções auxiliares ───────────────────────────────────────────────
 
-// FIX #9: menu de produtos mostra APENAS os produtos — sem botões extras
 async function showProducts(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   const session = getSession(userId);
@@ -657,7 +678,6 @@ async function showProducts(ctx: Context): Promise<void> {
       return [Markup.button.callback(label, `select_product_${p.id}`)];
     });
 
-    // FIX #11: Voltar na lista de produtos vai pro menu inicial
     buttons.push([Markup.button.callback('\u25c0\ufe0f Voltar', 'show_home')]);
 
     await editOrReply(
@@ -751,7 +771,6 @@ async function showOrders(ctx: Context): Promise<void> {
   }
 }
 
-// FIX #10: showHelp sem caracteres markdown problemáticos (—, /, etc escapados)
 async function showHelp(ctx: Context): Promise<void> {
   const supportUrl = `https://wa.me/${env.SUPPORT_PHONE}`;
 
@@ -761,6 +780,7 @@ async function showHelp(ctx: Context): Promise<void> {
     `*Comandos disponíveis:*\n` +
     `/start \u2014 Tela inicial\n` +
     `/produtos \u2014 Ver produtos\n` +
+    `/saldo \u2014 Ver e adicionar saldo\n` +
     `/meus\\_pedidos \u2014 Histórico de pedidos\n` +
     `/ajuda \u2014 Esta mensagem\n\n` +
     `*Como funciona?*\n` +
@@ -804,6 +824,9 @@ async function startBot(): Promise<void> {
     const me = await bot.telegram.getMe();
     logger.info(`📌 Bot username: @${me.username}`);
 
+    // FEATURE 6: registra o menu ☰ de comandos no Telegram
+    await registerCommands();
+
     const app = express();
     app.use(express.json());
 
@@ -831,6 +854,9 @@ async function startBot(): Promise<void> {
     await bot.launch();
     logger.info(`📌 Bot username: @${bot.botInfo?.username}`);
     logger.info('🤖 Bot iniciado em modo POLLING (desenvolvimento)');
+
+    // FEATURE 6: registra o menu ☰ de comandos no Telegram (polling também)
+    await registerCommands();
   }
 }
 
