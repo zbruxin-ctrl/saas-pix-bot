@@ -2,22 +2,23 @@
 
 import { useState } from 'react';
 
-interface SendResult {
-  sent: number;
-  failed: number;
+interface BroadcastResult {
+  jobId: string;
+  total: number;
+  status: string;
 }
 
 export default function BroadcastPage() {
-  const [message, setMessage] = useState('');
-  const [sending, setSending] = useState(false);
-  const [preview, setPreview] = useState(false);
-  const [result, setResult] = useState<SendResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [message,  setMessage]  = useState('');
+  const [sending,  setSending]  = useState(false);
+  const [preview,  setPreview]  = useState(false);
+  const [result,   setResult]   = useState<BroadcastResult | null>(null);
+  const [error,    setError]    = useState<string | null>(null);
 
   async function handleSend() {
     if (!message.trim() || sending) return;
     const confirmed = window.confirm(
-      `Confirma o envio desta mensagem para TODOS os usuários ativos?`
+      `Confirma o envio para TODOS os usuários ativos?`
     );
     if (!confirmed) return;
 
@@ -29,12 +30,13 @@ export default function BroadcastPage() {
       const res = await fetch('/api/admin/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        // API aceita: message, onlyActiveUsers?, parseMode?
+        body: JSON.stringify({ message, onlyActiveUsers: true, parseMode: 'Markdown' }),
         credentials: 'include',
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Erro ao enviar broadcast');
-      setResult(data.data ?? { sent: data.sent ?? 0, failed: data.failed ?? 0 });
+      setResult(data);
       setMessage('');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Erro desconhecido');
@@ -44,7 +46,7 @@ export default function BroadcastPage() {
   }
 
   const charCount = message.length;
-  const isEmpty = !message.trim();
+  const isEmpty   = !message.trim();
 
   return (
     <div className="space-y-6">
@@ -56,15 +58,15 @@ export default function BroadcastPage() {
         </p>
       </div>
 
-      {/* Feedback de resultado */}
+      {/* Resultado */}
       {result && (
         <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 flex items-center gap-3">
           <span className="text-lg">✅</span>
           <span>
-            Broadcast enviado com sucesso —{' '}
-            <strong>{result.sent} entregues</strong>
-            {result.failed > 0 && (
-              <span className="text-yellow-700">, {result.failed} falharam (usuários que bloquearam o bot)</span>
+            Broadcast enfileirado com sucesso —{' '}
+            <strong>{result.total} mensagens</strong> serão entregues em background
+            {result.jobId && (
+              <span className="ml-1 text-xs text-green-600">(jobId: {result.jobId})</span>
             )}
           </span>
           <button
@@ -91,12 +93,13 @@ export default function BroadcastPage() {
 
       {/* Formulário */}
       <div className="card space-y-5">
-        {/* Dicas de formatação */}
+
+        {/* Atalhos Markdown */}
         <div className="flex flex-wrap gap-2">
           {[
-            { label: '*negrito*', insert: '*texto*' },
-            { label: '_itálico_', insert: '_texto_' },
-            { label: '`código`', insert: '`texto`' },
+            { label: '*negrito*',   insert: '*texto*'         },
+            { label: '_itálico_',   insert: '_texto_'         },
+            { label: '`código`',    insert: '`texto`'          },
             { label: '```bloco```', insert: '```\ntexto\n```' },
           ].map((tip) => (
             <button
@@ -107,7 +110,7 @@ export default function BroadcastPage() {
               {tip.label}
             </button>
           ))}
-          <span className="text-xs text-gray-400 self-center ml-1">— formatação Markdown do Telegram</span>
+          <span className="text-xs text-gray-400 self-center ml-1">— Markdown do Telegram</span>
         </div>
 
         {/* Textarea */}
@@ -117,7 +120,7 @@ export default function BroadcastPage() {
           </label>
           <textarea
             className="input w-full min-h-[180px] resize-y font-mono text-sm leading-relaxed"
-            placeholder="Digite sua mensagem...&#10;&#10;Exemplo:&#10;🎉 *Promoção especial!*&#10;Use o código PROMO10 e ganhe 10% de desconto hoje."
+            placeholder={`Digite sua mensagem...\n\nExemplo:\n🎉 *Promoção especial!*\nUse o código PROMO10 e ganhe 10% de desconto hoje.`}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             disabled={sending}
@@ -152,8 +155,9 @@ export default function BroadcastPage() {
         {/* Footer */}
         <div className="flex items-center justify-between pt-3 border-t border-gray-100">
           <p className="text-xs text-gray-400">
-            ⚠️ A mensagem será enviada para <strong className="text-gray-600">todos os usuários ativos</strong>.
-            Essa ação não pode ser desfeita.
+            ⚠️ Enviado para{' '}
+            <strong className="text-gray-600">todos os usuários com pelo menos 1 pedido</strong>.
+            Processado em background com throttle de 25 msg/s.
           </p>
           <button
             onClick={handleSend}

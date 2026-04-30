@@ -2,19 +2,46 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
-interface BotSettings {
+// Formato que a API retorna/espera (snake_case, maintenance_mode como string)
+interface ApiSettings {
+  support_phone: string;
+  welcome_message: string;
+  maintenance_mode: string;       // 'true' | 'false'
+  maintenance_message: string;
+}
+
+// Formato do form (mais ergonômico para o React)
+interface FormSettings {
   supportPhone: string;
   welcomeMessage: string;
   maintenanceMode: boolean;
   maintenanceMessage: string;
 }
 
-const DEFAULTS: BotSettings = {
+const DEFAULTS: FormSettings = {
   supportPhone: '',
   welcomeMessage: '',
   maintenanceMode: false,
   maintenanceMessage: '⚙️ O bot está em manutenção. Voltamos em breve!',
 };
+
+function toForm(api: ApiSettings): FormSettings {
+  return {
+    supportPhone:       api.support_phone ?? '',
+    welcomeMessage:     api.welcome_message ?? '',
+    maintenanceMode:    api.maintenance_mode === 'true',
+    maintenanceMessage: api.maintenance_message ?? '',
+  };
+}
+
+function toApi(form: FormSettings): Record<string, string> {
+  return {
+    support_phone:       form.supportPhone,
+    welcome_message:     form.welcomeMessage,
+    maintenance_mode:    form.maintenanceMode ? 'true' : 'false',
+    maintenance_message: form.maintenanceMessage,
+  };
+}
 
 function Toggle({
   checked,
@@ -46,10 +73,10 @@ function Toggle({
 }
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<BotSettings>(DEFAULTS);
-  const [original, setOriginal] = useState<BotSettings>(DEFAULTS);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [settings, setSettings] = useState<FormSettings>(DEFAULTS);
+  const [original, setOriginal] = useState<FormSettings>(DEFAULTS);
+  const [loading,  setLoading]  = useState(true);
+  const [saving,   setSaving]   = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
   function showToast(msg: string, type: 'success' | 'error') {
@@ -60,12 +87,12 @@ export default function SettingsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/settings', { credentials: 'include' });
+      const res  = await fetch('/api/admin/settings', { credentials: 'include' });
       const data = await res.json();
       if (data.success && data.data) {
-        const merged = { ...DEFAULTS, ...data.data };
-        setSettings(merged);
-        setOriginal(merged);
+        const form = toForm(data.data as ApiSettings);
+        setSettings(form);
+        setOriginal(form);
       }
     } catch {
       //
@@ -76,7 +103,7 @@ export default function SettingsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  function set<K extends keyof BotSettings>(key: K, value: BotSettings[K]) {
+  function set<K extends keyof FormSettings>(key: K, value: FormSettings[K]) {
     setSettings((s) => ({ ...s, [key]: value }));
   }
 
@@ -88,7 +115,8 @@ export default function SettingsPage() {
       const res = await fetch('/api/admin/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        // API espera: { settings: { support_phone: '...', ... } }
+        body: JSON.stringify({ settings: toApi(settings) }),
         credentials: 'include',
       });
       const data = await res.json();
@@ -100,10 +128,6 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }
-
-  function handleDiscard() {
-    setSettings(original);
   }
 
   if (loading) {
@@ -162,7 +186,7 @@ export default function SettingsPage() {
           </div>
 
           {settings.maintenanceMode && (
-            <div className="ml-0 space-y-1">
+            <div className="space-y-1">
               <label className="block text-sm font-medium text-gray-700">
                 Mensagem exibida durante a manutenção
               </label>
@@ -184,7 +208,7 @@ export default function SettingsPage() {
             Número de Suporte (WhatsApp)
           </label>
           <p className="text-sm text-gray-500">
-            Número exibido no botão "Falar com suporte" do bot
+            Número exibido no botão “Falar com suporte” do bot
           </p>
           <div className="flex items-center gap-2 mt-2">
             <span className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 select-none whitespace-nowrap">
@@ -194,14 +218,12 @@ export default function SettingsPage() {
               className="input flex-1"
               placeholder="5511999999999"
               value={settings.supportPhone}
-              onChange={(e) =>
-                set('supportPhone', e.target.value.replace(/\D/g, ''))
-              }
+              onChange={(e) => set('supportPhone', e.target.value.replace(/\D/g, ''))}
             />
           </div>
           {settings.supportPhone && (
             <p className="text-xs text-blue-600 mt-1">
-              Link gerado:{' '}
+              Link:{' '}
               <a
                 href={`https://wa.me/${settings.supportPhone}`}
                 target="_blank"
@@ -213,7 +235,8 @@ export default function SettingsPage() {
             </p>
           )}
           <p className="text-xs text-gray-400">
-            Somente números com DDI. Ex: <code className="bg-gray-100 px-1 rounded">5511999999999</code>
+            Somente números com DDI. Ex:{' '}
+            <code className="bg-gray-100 px-1 rounded">5511999999999</code>
           </p>
         </div>
 
@@ -225,7 +248,8 @@ export default function SettingsPage() {
             Mensagem de Boas-vindas
           </label>
           <p className="text-sm text-gray-500">
-            Exibida quando o usuário inicia o bot pela primeira vez com <code className="bg-gray-100 px-1 rounded text-xs">/start</code>
+            Exibida quando o usuário usa{' '}
+            <code className="bg-gray-100 px-1 rounded text-xs">/start</code> pela primeira vez
           </p>
           <textarea
             className="input w-full min-h-[120px] resize-y text-sm mt-2"
@@ -235,8 +259,9 @@ export default function SettingsPage() {
           />
           <p className="text-xs text-gray-400">
             Use{' '}
-            <code className="bg-gray-100 px-1 rounded">{'{nome}'}</code>{' '}para o primeiro nome do usuário.{' '}
-            Suporta Markdown do Telegram: <code className="bg-gray-100 px-1 rounded">*negrito*</code>,{' '}
+            <code className="bg-gray-100 px-1 rounded">{'{nome}'}</code>{' '}
+            para o primeiro nome. Suporta Markdown:{' '}
+            <code className="bg-gray-100 px-1 rounded">*negrito*</code>,{' '}
             <code className="bg-gray-100 px-1 rounded">_itálico_</code>
           </p>
         </div>
@@ -245,7 +270,7 @@ export default function SettingsPage() {
         <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-100">
           {isDirty && (
             <button
-              onClick={handleDiscard}
+              onClick={() => setSettings(original)}
               disabled={saving}
               className="btn-secondary text-sm"
             >
