@@ -37,6 +37,12 @@
 //   → entrega falhava com "chat_id is empty" após pagamento com saldo confirmado.
 //   Solução: adicionado telegramId: string em PayWithBalanceParams; propagado em
 //   todos os call sites; deliveryService.deliver recebe { ...telegramUser, telegramId }.
+// FIX BALANCE CACHE STALE: createPayment lia saldo do userCache (TTL 5min),
+//   causando erro 400 "Saldo insuficiente" mesmo após ajuste manual pelo admin.
+//   Solução: saldo SEMPRE relido do DB antes do check — cache só armazena id/nome.
+//   Também corrigido invalidateUserCache em _payMixed que passava telegramUser.id
+//   (UUID interno) ao invés de telegramId (string do Telegram), tornando a
+//   invalidação um no-op silencioso.
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -93,6 +99,8 @@ interface PayMixedParams {
   pixAmount: number;
   firstName?: string;
   username?: string;
+  /** telegramId do Telegram — necessário para invalidar cache corretamente */
+  telegramId: string;
 }
 
 // ─── OPT #3: cache de productHasStockItems (TTL 30s) ─────────────────────────
@@ -104,6 +112,8 @@ export function invalidateStockItemCache(productId: string): void {
 }
 
 // ─── OPT #5: cache de usuário conhecido (TTL 5min) ───────────────────────────
+// NOTA: cache armazena apenas id/nome — saldo NUNCA é lido do cache
+// (sempre relido do DB para evitar leituras obsoletas após ajustes do admin).
 const userCacheTTL = 5 * 60_000;
 interface UserCacheEntry {
   id: string;
@@ -172,7 +182,14 @@ export class PaymentService {
 
     if (!product) throw new AppError('Produto não encontrado ou indisponível.', 404);
 
-    const balance = Number(telegramUser.balance);
+    // FIX BALANCE CACHE STALE: saldo SEMPRE relido do DB — cache pode estar
+    // desatualizado após ajuste manual do admin (sem invalidação externa) ou
+    // após cancelamento/expiração em que a invalidação não chegou a este nó.
+    const freshUser = await prisma.telegramUser.findUnique({
+      where: { id: telegramUser.id },
+      select: { balance: true },
+    });
+    const balance = freshUser ? Number(freshUser.balance) : 0;
     const price = Number(product.price);
 
     if (paymentMethod === 'BALANCE') {
@@ -199,7 +216,7 @@ export class PaymentService {
         return this._payWithBalance({ telegramUser, product, price, firstName, username, telegramId });
       }
 
-      return this._payMixed({ telegramUser, product, price, balanceUsed, pixAmount, firstName, username });
+      return this._payMixed({ telegramUser, product, price, balanceUsed, pixAmount, firstName, username, telegramId });
     }
 
     if (paymentMethod === 'PIX') {
@@ -314,13 +331,9 @@ export class PaymentService {
   }
 
   private async _payMixed({
-    telegramUser, product, price, balanceUsed, pixAmount, firstName, username,
+    telegramUser, product, price, balanceUsed, pixAmount, firstName, username, telegramId,
   }: PayMixedParams): Promise<CreatePaymentResponse> {
     // ── FIX B11 nível 1 (DB): detecta pagamento já existente ──────────────────
-    // Inclui OR para capturar pagamentos recém-criados que ainda não têm
-    // pixExpiresAt (MP ainda não respondeu). Sem esse OR, o 2º request chegava
-    // antes do prisma.payment.update com pixExpiresAt e criava um segundo
-    // pagamento, tentando reservar o mesmo estoque já reservado pelo 1º.
     const existingPending = await prisma.payment.findFirst({
       where: {
         telegramUserId: telegramUser.id,
@@ -329,7 +342,6 @@ export class PaymentService {
         paymentMethod: PaymentMethod.MIXED,
         OR: [
           { pixExpiresAt: { gt: new Date() } },
-          // pagamento criado há menos de 2 min ainda sem pixExpiresAt (MP processando)
           { pixExpiresAt: null, createdAt: { gt: new Date(Date.now() - 120_000) } },
         ],
       },
@@ -337,7 +349,6 @@ export class PaymentService {
     });
 
     if (existingPending) {
-      // Pagamento já completo (tem QR code) — retorna diretamente
       if (existingPending.pixQrCode && existingPending.pixExpiresAt) {
         logger.info(`[Mixed] Pagamento MIXED pendente reutilizado: ${existingPending.id}`);
         return {
@@ -352,14 +363,11 @@ export class PaymentService {
           isMixed: true,
         };
       }
-      // Pagamento existe mas 1º request ainda está criando o PIX no MP
       logger.warn(`[Mixed] Request duplicado bloqueado (DB): payment ${existingPending.id} ainda processando`);
       throw new AppError('Pagamento em processamento. Aguarde alguns instantes e tente novamente.', 429);
     }
 
     // ── FIX B11 nível 2 (memória): trava requests verdadeiramente simultâneos ──
-    // Cobre a janela de milissegundos em que o 1º request ainda não gravou o
-    // payment no DB, portanto o findFirst acima não encontraria nada.
     const lockKey = `mixed:${telegramUser.id}:${product.id}`;
     if (mixedPaymentLock.has(lockKey)) {
       logger.warn(`[Mixed] Request duplicado bloqueado (lock): ${lockKey}`);
@@ -418,7 +426,9 @@ export class PaymentService {
         });
       });
 
-      invalidateUserCache(telegramUser.id);
+      // FIX: usa telegramId (string do Telegram) — não telegramUser.id (UUID)
+      // O cache é indexado por telegramId; passar UUID era um no-op silencioso.
+      invalidateUserCache(telegramId);
 
       try {
         const mpPayment = await mercadoPagoService.createPixPayment({
@@ -707,6 +717,7 @@ export class PaymentService {
     }
 
     statusCache.delete(paymentId);
+    invalidateUserCache(payment.telegramUser.telegramId);
 
     logger.info(`[PaymentService] Pagamento ${paymentId} cancelado pelo usuário ${payment.telegramUser.telegramId}`);
 
