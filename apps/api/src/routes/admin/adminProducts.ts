@@ -3,6 +3,7 @@
 // SORT: PATCH /reorder para drag-and-drop no painel admin
 // FIX PROD: sortOrder removido do orderBy até migration ser aplicada no Railway
 // FEAT #1: POST /:productId/stock-items/bulk — upload em lote (textarea/CSV)
+// CACHE: notifyBotProductCacheInvalidation() após create/update/delete/reorder
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma, StockItemStatus } from '@prisma/client';
@@ -13,6 +14,7 @@ import { Request } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { logger } from '../../lib/logger';
+import { notifyBotProductCacheInvalidation } from '../../lib/botCache';
 
 export const adminProductsRouter = Router();
 
@@ -218,6 +220,7 @@ adminProductsRouter.patch(
       );
 
       logger.info(`[adminProducts] Ordem de ${items.length} produtos atualizada`);
+      notifyBotProductCacheInvalidation();
       res.json({ success: true, message: 'Ordem atualizada com sucesso' });
     } catch (err) {
       logger.error('[adminProducts] Erro ao reordenar produtos:', err);
@@ -341,6 +344,7 @@ adminProductsRouter.post(
       }
     }
 
+    notifyBotProductCacheInvalidation();
     res.status(201).json({ success: true, data: { ...product, price: Number(product.price) } });
   }
 );
@@ -381,6 +385,7 @@ adminProductsRouter.put(
       }
     }
 
+    notifyBotProductCacheInvalidation();
     res.json({ success: true, data: { ...product, price: Number(product.price) } });
   }
 );
@@ -392,6 +397,7 @@ adminProductsRouter.delete(
   requireRole('SUPERADMIN'),
   async (req: AuthenticatedRequest, res: Response) => {
     await prisma.product.update({ where: { id: req.params.id }, data: { isActive: false } });
+    notifyBotProductCacheInvalidation();
     res.json({ success: true });
   }
 );

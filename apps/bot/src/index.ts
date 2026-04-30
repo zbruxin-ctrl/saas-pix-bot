@@ -22,13 +22,14 @@
 // FIX #13: escapeMd() em todos os campos dinâmicos — corrige Bad Request: can't parse entities
 // FIX #14: removidos \_ e \- do showHelp — Markdown v1 não suporta escape de caracteres
 // FIX #15: showHelp migrado para HTML — o _ em /meus_pedidos não é especial em HTML
+// CACHE: endpoint POST /internal/cache/invalidate-products — chamado pela API após mutations de produto
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
 import { env } from './config/env';
-import { apiClient } from './services/apiClient';
+import { apiClient, invalidateProductCache } from './services/apiClient';
 import type { OrderSummary } from './services/apiClient';
 import type { ProductDTO, WalletTransactionDTO } from '@saas-pix/shared';
 
@@ -877,6 +878,20 @@ async function startBot(): Promise<void> {
     });
 
     app.get('/health', (_req, res) => res.json({ status: 'ok', bot: me.username }));
+
+    // ─── Invalidação de cache de produtos ──────────────────────────────────
+    // Chamado pela API (apps/api/src/lib/botCache.ts) após create/update/delete
+    // de produtos no painel admin. Protegido pelo mesmo TELEGRAM_BOT_SECRET.
+    app.post('/internal/cache/invalidate-products', (req, res) => {
+      const secret = req.headers['x-bot-secret'];
+      if (secret !== env.TELEGRAM_BOT_SECRET) {
+        res.sendStatus(403);
+        return;
+      }
+      invalidateProductCache();
+      logger.info('[cache] Cache de produtos invalidado via API admin');
+      res.json({ ok: true });
+    });
 
     app.listen(PORT, () => {
       logger.info(`🚀 Servidor webhook do bot escutando na porta ${PORT}`);
