@@ -43,6 +43,15 @@
 //   Também corrigido invalidateUserCache em _payMixed que passava telegramUser.id
 //   (UUID interno) ao invés de telegramId (string do Telegram), tornando a
 //   invalidação um no-op silencioso.
+// FIX B12: _payWithBalance deduplica requests concorrentes em 2 níveis
+//   Problema: bot dispara 2 requests quase simultâneos para compra com saldo.
+//   O 1º processa corretamente (201); o 2º lê saldo já decrementado → 400 "Saldo
+//   insuficiente" — mesmo o produto sendo entregue com sucesso pelo 1º request.
+//   Solução nível 1 (DB): findFirst por pagamento BALANCE APPROVED para o mesmo
+//     usuário+produto criado nos últimos 30s. Se encontrado, retorna idempotente.
+//   Solução nível 2 (memória): Set balancePaymentLock keyed por userId:productId.
+//     Bloqueia requests simultâneos que chegam antes do DB registrar o primeiro
+//     pagamento (janela de milissegundos). Retorna 429 com mensagem amigável.
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -171,6 +180,11 @@ const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }
 // usuário+produto processe a criação do pagamento misto por vez.
 const mixedPaymentLock = new Set<string>();
 
+// ─── FIX B12 nível 2: lock in-memory para _payWithBalance simultâneos ─────────
+// Chave: `balance:{userId}:{productId}` — garante que apenas 1 request por
+// usuário+produto processe a compra com saldo por vez.
+const balancePaymentLock = new Set<string>();
+
 export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username, paymentMethod } = data;
@@ -232,102 +246,143 @@ export class PaymentService {
   private async _payWithBalance({
     telegramUser, product, price, firstName, username, telegramId,
   }: PayWithBalanceParams): Promise<CreatePaymentResponse> {
-    logger.info(`[Wallet] Usuário ${telegramUser.id} pagando 100% com saldo (${price}).`);
-
-    const hasStockItems = await this.productHasStockItems(product.id);
-
-    const { payment, order } = await prisma.$transaction(async (tx) => {
-      const currentUser = await tx.telegramUser.findUnique({
-        where: { id: telegramUser.id },
-        select: { balance: true },
-      });
-      if (!currentUser || Number(currentUser.balance) < price) {
-        throw new AppError('Saldo insuficiente.', 400);
-      }
-
-      const newPayment = await tx.payment.create({
-        data: {
-          telegramUserId: telegramUser.id,
-          productId: product.id,
-          amount: price,
-          status: PaymentStatus.APPROVED,
-          approvedAt: new Date(),
-          paymentMethod: PaymentMethod.BALANCE,
-          balanceUsed: price,
-          metadata: { firstName, username, productName: product.name, paidWithBalance: true, paymentMethod: 'BALANCE' },
-        },
-      });
-
-      const newOrder = await tx.order.create({
-        data: {
-          paymentId: newPayment.id,
-          telegramUserId: telegramUser.id,
-          productId: product.id,
-          status: 'PROCESSING',
-        },
-      });
-
-      await tx.telegramUser.update({
-        where: { id: telegramUser.id },
-        data: { balance: { decrement: price } },
-      });
-      await tx.walletTransaction.create({
-        data: {
-          telegramUserId: telegramUser.id,
-          type: 'PURCHASE',
-          amount: price,
-          description: `Compra: ${product.name}`,
-          paymentId: newPayment.id,
-        },
-      });
-
-      return { payment: newPayment, order: newOrder };
+    // ── FIX B12 nível 1 (DB): detecta pagamento BALANCE já aprovado recentemente ─
+    // Cobre o caso em que o 1º request já completou e o 2º chega com saldo
+    // já decrementado. Retorna o mesmo resultado de forma idempotente.
+    const existingApproved = await prisma.payment.findFirst({
+      where: {
+        telegramUserId: telegramUser.id,
+        productId: product.id,
+        status: PaymentStatus.APPROVED,
+        paymentMethod: PaymentMethod.BALANCE,
+        approvedAt: { gt: new Date(Date.now() - 30_000) },
+      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    invalidateUserCache(telegramId);
-
-    if (product.stock !== null || hasStockItems) {
-      try {
-        await stockService.reserveStock(product.id, telegramUser.id, payment.id);
-        invalidateStockItemCache(product.id);
-        await stockService.confirmReservation(payment.id);
-      } catch (err) {
-        logger.error(`[Wallet] Erro ao reservar estoque para payment ${payment.id}:`, err);
-        try {
-          await walletService.deposit(
-            telegramUser.id,
-            price,
-            `Estorno automático: falha no estoque do produto ${product.name}`,
-            payment.id,
-          );
-        } catch (estornoErr) {
-          logger.error(`[Wallet] CRÍTICO: falha no estorno do payment ${payment.id} — intervenção manual necessária`, estornoErr);
-        }
-        await prisma.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() } });
-        throw new AppError('Produto sem estoque disponível.', 409);
-      }
+    if (existingApproved) {
+      logger.info(`[Wallet] Pagamento BALANCE duplicado detectado (DB): ${existingApproved.id} — retornando idempotente`);
+      return {
+        paymentId: existingApproved.id,
+        pixQrCode: '',
+        pixQrCodeText: '',
+        amount: Number(existingApproved.amount),
+        balanceUsed: Number(existingApproved.balanceUsed ?? price),
+        expiresAt: new Date().toISOString(),
+        productName: product.name,
+        paidWithBalance: true,
+      };
     }
 
-    // FIX BALANCE DELIVERY: injeta telegramId no snap para que deliveryService
-    // consiga enviar a mensagem ao usuário correto via Telegram.
-    deliveryService.deliver(
-      order.id,
-      { ...telegramUser, telegramId } as Parameters<typeof deliveryService.deliver>[1],
-      product as Parameters<typeof deliveryService.deliver>[2]
-    ).catch((err) => {
-      logger.error(`[Wallet] Erro na entrega do order ${order.id}:`, err);
-    });
+    // ── FIX B12 nível 2 (memória): trava requests verdadeiramente simultâneos ──
+    // Cobre a janela de milissegundos em que o 1º request ainda não gravou no DB.
+    const lockKey = `balance:${telegramUser.id}:${product.id}`;
+    if (balancePaymentLock.has(lockKey)) {
+      logger.warn(`[Wallet] Request duplicado bloqueado (lock): ${lockKey}`);
+      throw new AppError('Pagamento em processamento. Aguarde alguns instantes e tente novamente.', 429);
+    }
+    balancePaymentLock.add(lockKey);
 
-    return {
-      paymentId: payment.id,
-      pixQrCode: '',
-      pixQrCodeText: '',
-      amount: price,
-      balanceUsed: price,
-      expiresAt: new Date().toISOString(),
-      productName: product.name,
-      paidWithBalance: true,
-    };
+    try {
+      logger.info(`[Wallet] Usuário ${telegramUser.id} pagando 100% com saldo (${price}).`);
+
+      const hasStockItems = await this.productHasStockItems(product.id);
+
+      const { payment, order } = await prisma.$transaction(async (tx) => {
+        const currentUser = await tx.telegramUser.findUnique({
+          where: { id: telegramUser.id },
+          select: { balance: true },
+        });
+        if (!currentUser || Number(currentUser.balance) < price) {
+          throw new AppError('Saldo insuficiente.', 400);
+        }
+
+        const newPayment = await tx.payment.create({
+          data: {
+            telegramUserId: telegramUser.id,
+            productId: product.id,
+            amount: price,
+            status: PaymentStatus.APPROVED,
+            approvedAt: new Date(),
+            paymentMethod: PaymentMethod.BALANCE,
+            balanceUsed: price,
+            metadata: { firstName, username, productName: product.name, paidWithBalance: true, paymentMethod: 'BALANCE' },
+          },
+        });
+
+        const newOrder = await tx.order.create({
+          data: {
+            paymentId: newPayment.id,
+            telegramUserId: telegramUser.id,
+            productId: product.id,
+            status: 'PROCESSING',
+          },
+        });
+
+        await tx.telegramUser.update({
+          where: { id: telegramUser.id },
+          data: { balance: { decrement: price } },
+        });
+        await tx.walletTransaction.create({
+          data: {
+            telegramUserId: telegramUser.id,
+            type: 'PURCHASE',
+            amount: price,
+            description: `Compra: ${product.name}`,
+            paymentId: newPayment.id,
+          },
+        });
+
+        return { payment: newPayment, order: newOrder };
+      });
+
+      invalidateUserCache(telegramId);
+
+      if (product.stock !== null || hasStockItems) {
+        try {
+          await stockService.reserveStock(product.id, telegramUser.id, payment.id);
+          invalidateStockItemCache(product.id);
+          await stockService.confirmReservation(payment.id);
+        } catch (err) {
+          logger.error(`[Wallet] Erro ao reservar estoque para payment ${payment.id}:`, err);
+          try {
+            await walletService.deposit(
+              telegramUser.id,
+              price,
+              `Estorno automático: falha no estoque do produto ${product.name}`,
+              payment.id,
+            );
+          } catch (estornoErr) {
+            logger.error(`[Wallet] CRÍTICO: falha no estorno do payment ${payment.id} — intervenção manual necessária`, estornoErr);
+          }
+          await prisma.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() } });
+          throw new AppError('Produto sem estoque disponível.', 409);
+        }
+      }
+
+      // FIX BALANCE DELIVERY: injeta telegramId no snap para que deliveryService
+      // consiga enviar a mensagem ao usuário correto via Telegram.
+      deliveryService.deliver(
+        order.id,
+        { ...telegramUser, telegramId } as Parameters<typeof deliveryService.deliver>[1],
+        product as Parameters<typeof deliveryService.deliver>[2]
+      ).catch((err) => {
+        logger.error(`[Wallet] Erro na entrega do order ${order.id}:`, err);
+      });
+
+      return {
+        paymentId: payment.id,
+        pixQrCode: '',
+        pixQrCodeText: '',
+        amount: price,
+        balanceUsed: price,
+        expiresAt: new Date().toISOString(),
+        productName: product.name,
+        paidWithBalance: true,
+      };
+    } finally {
+      balancePaymentLock.delete(lockKey);
+    }
   }
 
   private async _payMixed({
