@@ -25,6 +25,7 @@
 // CACHE: endpoint POST /internal/cache/invalidate-products — chamado pela API após mutations de produto
 // FIX B13: paymentInProgress Set em executePayment — bloqueia 2º request duplicado do Telegram
 // FIX B14: res.sendStatus(200) ANTES do await bot.handleUpdate — evita retry do Telegram por timeout
+// FIX B15: dedup por update_id no webhook — descarta retries do Telegram antes de processar
 
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -96,6 +97,18 @@ function cleanupSessions(): void {
 }
 
 setInterval(cleanupSessions, SESSION_CLEANUP_INTERVAL_MS);
+
+// FIX B15: dedup de update_id — evita processar o mesmo update duas vezes
+// O Telegram reenvia o update se não receber 200 em tempo hábil.
+// Guardamos os últimos 1000 update_ids processados; limpamos a cada 5 min.
+const processedUpdateIds = new Set<number>();
+const UPDATE_DEDUP_CLEANUP_MS = 5 * 60_000;
+setInterval(() => {
+  if (processedUpdateIds.size > 0) {
+    processedUpdateIds.clear();
+    logger.info('[dedup] Cache de update_ids limpo');
+  }
+}, UPDATE_DEDUP_CLEANUP_MS);
 
 const paymentInProgress = new Set<number>();
 
@@ -848,9 +861,20 @@ async function startBot(): Promise<void> {
         res.sendStatus(403);
         return;
       }
-      // FIX B14: responde 200 IMEDIATAMENTE — evita que o Telegram faça retry
-      // por timeout e envie o mesmo update duas vezes (causa do bug de pagamento duplo)
+
+      // FIX B14: responde 200 IMEDIATAMENTE — evita retry do Telegram por timeout
       res.sendStatus(200);
+
+      // FIX B15: dedup por update_id — descarta o mesmo update se já foi processado
+      const updateId: number | undefined = req.body?.update_id;
+      if (updateId !== undefined) {
+        if (processedUpdateIds.has(updateId)) {
+          logger.warn(`[B15] update_id ${updateId} duplicado — ignorado`);
+          return;
+        }
+        processedUpdateIds.add(updateId);
+      }
+
       bot.handleUpdate(req.body).catch((err) => {
         logger.error('[webhook] Erro ao processar update:', err);
       });
