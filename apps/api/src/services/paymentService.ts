@@ -26,6 +26,7 @@
 // FIX-BUILD: corrige chamada createPixPayment (1 objeto), qr_code path, remove isDeposit/orderId
 //            (não existem no schema), adiciona findExpiredPaymentIds/cancelExpiredPayment,
 //            usa refundPayment em vez de cancelPayment no MP
+// FIX-BUILD2: troca env.WEBHOOK_URL → env.BOT_WEBHOOK_URL (variável correta do schema)
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -431,7 +432,7 @@ export class PaymentService {
         description: `Compra MIXED: ${product.name}`,
         payerName: firstName ?? 'Usuario',
         externalReference,
-        notificationUrl: env.WEBHOOK_URL ?? '',
+        notificationUrl: env.BOT_WEBHOOK_URL ?? '',
       });
 
       const { qr_code, qr_code_base64 } = extractQrCodes(mpPayment);
@@ -517,7 +518,7 @@ export class PaymentService {
       description: `Compra: ${product.name}`,
       payerName: firstName ?? 'Usuario',
       externalReference,
-      notificationUrl: env.WEBHOOK_URL ?? '',
+      notificationUrl: env.BOT_WEBHOOK_URL ?? '',
     });
 
     const { qr_code, qr_code_base64 } = extractQrCodes(mpPayment);
@@ -599,7 +600,7 @@ export class PaymentService {
       description: 'Depósito de saldo',
       payerName: firstName ?? 'Usuario',
       externalReference,
-      notificationUrl: env.WEBHOOK_URL ?? '',
+      notificationUrl: env.BOT_WEBHOOK_URL ?? '',
     });
 
     const { qr_code, qr_code_base64 } = extractQrCodes(mpPayment);
