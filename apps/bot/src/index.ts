@@ -2,6 +2,11 @@
  * Ponto de entrada do bot — inicialização, registro de handlers e servidor webhook.
  * Toda a lógica de negócio está nos módulos em handlers/ e services/.
  */
+
+// Sentry DEVE ser o primeiro import — captura erros desde o início
+import { initSentry, captureError } from './config/sentry';
+initSentry();
+
 import express from 'express';
 import { Telegraf, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -35,7 +40,6 @@ bot.command('start', async (ctx) => {
   const userId = ctx.from!.id;
   const existing = await getSession(userId);
 
-  // P3 FIX: /start durante pagamento em andamento — preserva sessão e avisa o usuário
   if (existing.step === 'awaiting_payment' && existing.paymentId) {
     await ctx.reply(
       '⚠️ Você tem um *pagamento PIX em andamento*\!\n\n' +
@@ -118,7 +122,8 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
     session.products = products as never;
     balanceResult = Number(walletData.balance);
     await saveSession(userId, session);
-  } catch {
+  } catch (err) {
+    captureError(err, { handler: 'select_product', productId, userId });
     await ctx.reply('❌ Erro ao buscar produto\. Tente novamente\.', { parse_mode: 'MarkdownV2' });
     return;
   }
@@ -178,7 +183,6 @@ bot.on(message('text'), async (ctx) => {
     return;
   }
 
-  // Mensagem não reconhecida
   await ctx.reply(
     'Não entendi sua mensagem\. Use os botões abaixo para navegar:',
     {
@@ -196,6 +200,7 @@ bot.on(message('text'), async (ctx) => {
 // ─── Error handler global ─────────────────────────────────────────────────────
 bot.catch((err, ctx) => {
   console.error(`[bot] Erro no update ${ctx.update.update_id}:`, err);
+  captureError(err, { updateId: ctx.update.update_id, userId: ctx.from?.id });
 });
 
 // ─── Registro de comandos ─────────────────────────────────────────────────────
@@ -248,6 +253,7 @@ async function startBot(): Promise<void> {
 
       bot.handleUpdate(req.body).catch((err) => {
         console.error('[webhook] Erro ao processar update:', err);
+        captureError(err, { context: 'handleUpdate', updateId });
       });
     });
 
@@ -277,6 +283,7 @@ async function startBot(): Promise<void> {
 }
 
 startBot().catch((err) => {
+  captureError(err, { context: 'startBot' });
   console.error('Falha ao iniciar o bot:', err);
   process.exit(1);
 });
