@@ -4,6 +4,7 @@
 // FIX PROD: sortOrder removido do orderBy até migration ser aplicada no Railway
 // FEAT #1: POST /:productId/stock-items/bulk — upload em lote (textarea/CSV)
 // CACHE: notifyBotProductCacheInvalidation() após create/update/delete/reorder
+// FIX CARD: GET / inclui _count.stockItems para exibir disponíveis sem fetch extra
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma, StockItemStatus } from '@prisma/client';
@@ -152,6 +153,7 @@ adminProductsRouter.post(
 );
 
 // ─── Listagem ─────────────────────────────────────────────────────────────────
+// FIX: inclui _count.stockItems para o card mostrar disponíveis sem fetch extra
 
 adminProductsRouter.get(
   '/',
@@ -161,7 +163,17 @@ adminProductsRouter.get(
       const { page, perPage } = listQuerySchema.parse(req.query);
       const skip = (page - 1) * perPage;
 
-      let products: Prisma.ProductGetPayload<object>[];
+      const include = {
+        _count: {
+          select: {
+            stockItems: {
+              where: { status: StockItemStatus.AVAILABLE },
+            },
+          },
+        },
+      };
+
+      let products: Prisma.ProductGetPayload<{ include: typeof include }>[];
       let total: number;
 
       try {
@@ -170,6 +182,7 @@ adminProductsRouter.get(
             orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
             skip,
             take: perPage,
+            include,
           }),
           prisma.product.count(),
         ]);
@@ -179,6 +192,7 @@ adminProductsRouter.get(
             orderBy: { createdAt: 'asc' },
             skip,
             take: perPage,
+            include,
           }),
           prisma.product.count(),
         ]);
@@ -187,7 +201,12 @@ adminProductsRouter.get(
       res.json({
         success: true,
         data: {
-          data: products.map((p) => ({ ...p, price: Number(p.price) })),
+          data: products.map((p) => ({
+            ...p,
+            price: Number(p.price),
+            // disponiveisCount: número real de StockItems AVAILABLE
+            disponiveisCount: p._count.stockItems,
+          })),
           total,
           page,
           perPage,

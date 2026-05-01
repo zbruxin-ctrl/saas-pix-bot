@@ -19,10 +19,12 @@ import { formatCurrency } from '@/lib/utils';
 import { toast } from '@/components/admin/Toast';
 import ConfirmModal from '@/components/admin/ConfirmModal';
 
+// disponiveisCount vem da API via _count.stockItems (AVAILABLE)
 interface Product extends ProductDTO {
   deliveryContent?: string | null;
   stockItems?: StockItemDTO[];
   _count?: { payments: number; orders: number };
+  disponiveisCount?: number;
 }
 
 interface DeliveryItem {
@@ -82,7 +84,7 @@ function newMedia(): ProductMedia {
   return { url: '', mediaType: 'IMAGE', caption: '' };
 }
 
-function validate(form: typeof EMPTY_FORM, items: DeliveryItem[]): string | null {
+function validate(form: typeof EMPTY_FORM, items: DeliveryItem[], isEdit: boolean): string | null {
   if (!form.name.trim()) return 'O nome do produto é obrigatório.';
   if (!form.description.trim()) return 'A descrição é obrigatória.';
   const price = parseFloat(form.price);
@@ -91,7 +93,8 @@ function validate(form: typeof EMPTY_FORM, items: DeliveryItem[]): string | null
   const usesItems = FIFO_TYPES.includes(form.deliveryType);
   if (usesItems) {
     const filled = items.filter((i) => i.value.trim());
-    if (filled.length === 0) return 'Adicione pelo menos um item de entrega.';
+    // Em edição sem nenhum item novo preenchido: permite salvar sem alterar o estoque
+    if (!isEdit && filled.length === 0) return 'Adicione pelo menos um item de entrega.';
     if (form.deliveryType === 'ACCOUNT') {
       for (const item of filled) {
         try { JSON.parse(item.value); } catch {
@@ -205,7 +208,12 @@ function SortableCard({
   onEdit,
   onDelete,
 }: SortableCardProps) {
-  const itemCount = p.stockItems ? p.stockItems.length : null;
+  const isFifo = FIFO_TYPES.includes(p.deliveryType);
+  // Para FIFO: usa disponiveisCount (vem da API via _count.stockItems AVAILABLE)
+  // Para numérico: usa p.stock
+  // Nunca mostra os dois ao mesmo tempo
+  const fifoCount = isFifo ? (p.disponiveisCount ?? 0) : null;
+  const numericStock = !isFifo && p.stock != null ? p.stock : null;
 
   return (
     <div
@@ -252,14 +260,17 @@ function SortableCard({
       <div className="text-2xl font-bold text-blue-600 mb-3">{formatCurrency(p.price)}</div>
       <div className="flex items-center gap-2 text-xs text-gray-500 mb-4 flex-wrap">
         <span className="bg-gray-100 px-2 py-1 rounded">{p.deliveryType}</span>
-        {itemCount !== null && (
-          <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded">
-            {itemCount} item{itemCount !== 1 ? 's' : ''} disponíveis
+        {fifoCount !== null && (
+          <span className={[
+            'px-2 py-1 rounded',
+            fifoCount > 0 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600',
+          ].join(' ')}>
+            {fifoCount} disponíve{fifoCount !== 1 ? 'is' : 'l'}
           </span>
         )}
-        {p.stock != null && (
+        {numericStock !== null && (
           <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded">
-            {p.stock} em estoque
+            {numericStock} em estoque
           </span>
         )}
       </div>
@@ -386,6 +397,8 @@ export default function ProductsClient() {
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  // loadingItems: true enquanto busca stockItems ao abrir edição
+  const [loadingItems, setLoadingItems] = useState(false);
 
   // ── Drag-and-drop state ──────────────────────────────────────────────────────
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -479,7 +492,8 @@ export default function ProductsClient() {
       description: p.description,
       price: String(p.price),
       deliveryType: p.deliveryType,
-      deliveryContent: p.deliveryContent ?? '',
+      // Não expõe __FIFO__ no campo — o conteúdo real vem dos stockItems
+      deliveryContent: p.deliveryContent === '__FIFO__' ? '' : (p.deliveryContent ?? ''),
       confirmationMessage: (meta.confirmationMessage as string) ?? '',
       isActive: p.isActive,
       stock: p.stock != null ? String(p.stock) : '',
@@ -489,13 +503,16 @@ export default function ProductsClient() {
     setShowModal(true);
 
     if (FIFO_TYPES.includes(p.deliveryType)) {
-      if (p.stockItems && p.stockItems.length > 0) {
-        setItems(stockItemsToDeliveryItems(p.stockItems));
-      } else {
-        getStockItems(p.id)
-          .then((si) => setItems(stockItemsToDeliveryItems(si)))
-          .catch(() => setItems([newItem()]));
-      }
+      // Sempre busca os stockItems frescos da API ao abrir edição
+      setLoadingItems(true);
+      setItems([newItem()]); // placeholder enquanto carrega
+      getStockItems(p.id)
+        .then((si) => setItems(stockItemsToDeliveryItems(si)))
+        .catch(() => {
+          setItems([newItem()]);
+          toast('Erro ao carregar itens de estoque', 'error');
+        })
+        .finally(() => setLoadingItems(false));
     } else {
       setItems([newItem()]);
     }
@@ -530,7 +547,8 @@ export default function ProductsClient() {
   }
 
   async function handleSave() {
-    const err = validate(form, items);
+    const isEdit = !!editId;
+    const err = validate(form, items, isEdit);
     if (err) { setFieldError(err); return; }
 
     setSaving(true);
@@ -538,9 +556,20 @@ export default function ProductsClient() {
 
     try {
       const isFifo = FIFO_TYPES.includes(form.deliveryType);
+      const filledItems = items.filter((i) => i.value.trim());
       const deliveryContent = isFifo ? itemsToContent(items) : form.deliveryContent;
-      const fifoCount = isFifo ? items.filter((i) => i.value.trim()).length : null;
-      const stockValue = isFifo ? fifoCount : form.stock ? parseInt(form.stock, 10) : null;
+
+      // stock:
+      // - FIFO + criação: passa filledItems.length para refletir o que foi enviado
+      // - FIFO + edição sem novos itens: não sobrescreve (backend mantém pelo syncFifoItems)
+      // - Numérico: usa o campo do form
+      // - FILE_MEDIA/outros: null = ilimitado
+      let stockValue: number | null;
+      if (isFifo) {
+        stockValue = filledItems.length > 0 ? filledItems.length : null;
+      } else {
+        stockValue = form.stock ? parseInt(form.stock, 10) : null;
+      }
 
       const existingMeta = (allProducts.find((p) => p.id === editId)?.metadata ?? {}) as Record<string, unknown>;
       const newMetadata = {
@@ -755,32 +784,38 @@ export default function ProductsClient() {
                     </button>
                   </div>
 
-                  <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {items.map((item) => (
-                      <div key={item.id} className="flex gap-2 items-center">
-                        <input
-                          className="input flex-1 text-sm font-mono"
-                          value={item.value}
-                          onChange={(e) => updateItemValue(item.id, e.target.value)}
-                          placeholder={
-                            form.deliveryType === 'ACCOUNT'
-                              ? '{"email":"x@x.com","senha":"123"}'
-                              : form.deliveryType === 'LINK'
-                              ? 'https://...'
-                              : 'Conteúdo do item'
-                          }
-                        />
-                        <button
-                          type="button"
-                          onClick={() => removeItem(item.id)}
-                          className="shrink-0 text-gray-300 hover:text-red-500 text-lg leading-none px-1 transition-colors"
-                          title="Remover item"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                  {loadingItems ? (
+                    <div className="flex items-center gap-2 text-sm text-gray-400 py-3">
+                      <span className="animate-spin">⏳</span> Carregando itens de estoque...
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {items.map((item) => (
+                        <div key={item.id} className="flex gap-2 items-center">
+                          <input
+                            className="input flex-1 text-sm font-mono"
+                            value={item.value}
+                            onChange={(e) => updateItemValue(item.id, e.target.value)}
+                            placeholder={
+                              form.deliveryType === 'ACCOUNT'
+                                ? '{"email":"x@x.com","senha":"123"}'
+                                : form.deliveryType === 'LINK'
+                                ? 'https://...'
+                                : 'Conteúdo do item'
+                            }
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeItem(item.id)}
+                            className="shrink-0 text-gray-300 hover:text-red-500 text-lg leading-none px-1 transition-colors"
+                            title="Remover item"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <button
                     type="button"
@@ -848,7 +883,7 @@ export default function ProductsClient() {
 
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowModal(false)} className="btn-secondary flex-1" disabled={saving}>Cancelar</button>
-                <button type="button" onClick={handleSave} className="btn-primary flex-1" disabled={saving}>
+                <button type="button" onClick={handleSave} className="btn-primary flex-1" disabled={saving || loadingItems}>
                   {saving ? 'Salvando...' : editId ? 'Salvar alterações' : 'Criar produto'}
                 </button>
               </div>
