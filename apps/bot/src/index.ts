@@ -5,7 +5,7 @@
 //   Acoes permitidas: /start (mostra msg), /ajuda, /meus_pedidos, ver saldo
 // FEAT-DESC: descricao rica dos produtos
 // FEAT-CANCEL-DEPOSIT: botao cancelar PIX de deposito
-// FIX-CANCEL: editMessageCaption para foto + lock anti-duplo-clique
+// FIX-CANCEL: deleta foto do QR + envia msg de texto limpa + lock anti-duplo-clique
 import express from 'express';
 import { Telegraf, Markup, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -42,7 +42,7 @@ interface UserSession {
   selectedProductId?: string;
   paymentId?: string;
   depositPaymentId?: string;
-  depositMessageId?: number; // ID da mensagem com foto do QR de deposito
+  depositMessageId?: number; // ID da mensagem de foto do QR de deposito
   products?: ProductDTO[];
   mainMessageId?: number;
   firstName?: string;
@@ -81,7 +81,7 @@ setInterval(() => { processedUpdateIds.clear(); }, 5 * 60_000);
 
 const paymentInProgress = new Set<number>();
 
-// FIX-CANCEL: lock para evitar duplo clique em cancelamentos
+// Lock para evitar duplo clique em cancelamentos
 const cancelInProgress = new Set<string>(); // chave: paymentId
 
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
@@ -163,10 +163,9 @@ async function editOrReplyHtml(
   session.mainMessageId = sent.message_id;
 }
 
-// ─── Cancela e substitui mensagem do QR (funciona tanto para foto quanto para texto) ───
-// Para fotos: edita a caption e remove os botões
-// Para texto: usa editOrReply normalmente
-async function replaceCancelledMessage(
+// FIX-CANCEL: deleta a mensagem de foto (QR) e envia uma mensagem de texto limpa no lugar.
+// A API do Telegram nao permite converter foto em texto via edicao, por isso deletamos e reenviamos.
+async function deletePhotoAndReply(
   ctx: Context,
   session: UserSession,
   text: string,
@@ -174,43 +173,26 @@ async function replaceCancelledMessage(
 ): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) {
-    await editOrReply(ctx, text, extra);
+    const sent = await ctx.replyWithMarkdown(text, extra as object);
+    session.mainMessageId = sent.message_id;
+    session.depositMessageId = undefined;
     return;
   }
 
-  // Se era uma mensagem de foto (depositMessageId), edita a caption
+  // Tenta deletar a mensagem da foto (depositMessageId tem prioridade, senao mainMessageId)
   const photoMsgId = session.depositMessageId ?? session.mainMessageId;
   if (photoMsgId) {
-    try {
-      await ctx.telegram.editMessageCaption(chatId, photoMsgId, undefined, text, {
-        parse_mode: 'Markdown',
-        reply_markup: extra?.reply_markup as ReturnType<typeof Markup.inlineKeyboard>['reply_markup'] | undefined,
-      });
-      session.mainMessageId = photoMsgId;
-      session.depositMessageId = undefined;
-      return;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      // Se falhou por nao ser foto, tenta editMessageText
-      if (!msg.includes('message is not modified')) {
-        try {
-          await ctx.telegram.editMessageText(chatId, photoMsgId, undefined, text, {
-            parse_mode: 'Markdown',
-            ...extra,
-          });
-          session.mainMessageId = photoMsgId;
-          session.depositMessageId = undefined;
-          return;
-        } catch {
-          // ignora e manda nova mensagem
-        }
-      }
-    }
+    await ctx.telegram.deleteMessage(chatId, photoMsgId).catch(() => {});
+    session.mainMessageId = undefined;
+    session.depositMessageId = undefined;
   }
 
-  const sent = await ctx.replyWithMarkdown(text, extra as object);
+  // Envia mensagem de texto limpa
+  const sent = await ctx.telegram.sendMessage(chatId, text, {
+    parse_mode: 'Markdown',
+    ...(extra as object),
+  });
   session.mainMessageId = sent.message_id;
-  session.depositMessageId = undefined;
 }
 
 // ─── Mensagem de conta suspensa ──────────────────────────────────────────
@@ -764,7 +746,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   const paymentId = ctx.match[1];
   const userId = ctx.from!.id;
 
-  // FIX-CANCEL: lock anti-duplo-clique por paymentId
+  // Lock anti-duplo-clique por paymentId
   if (cancelInProgress.has(paymentId)) {
     await ctx.answerCbQuery('\u23f3 Cancelamento j\u00e1 em andamento...', { show_alert: false }).catch(() => {});
     return;
@@ -782,9 +764,8 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
 
   const session = getSession(userId);
 
-  // FIX-CANCEL: substitui a mensagem (foto ou texto) com a msg de cancelamento
-  // Usa replaceCancelledMessage que sabe editar caption de foto
-  await replaceCancelledMessage(
+  // FIX-CANCEL: deleta a mensagem de foto e envia mensagem de texto limpa
+  await deletePhotoAndReply(
     ctx,
     session,
     '\u274c *Pagamento cancelado.*\n\nVolte quando quiser!',
@@ -795,7 +776,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
     }
   );
 
-  // Reseta a sessao
+  // Reseta a sessao preservando o firstName
   const firstName = session.firstName;
   sessions.set(userId, { step: 'idle', firstName, lastActivityAt: Date.now() });
 
@@ -853,7 +834,7 @@ bot.on(message('text'), async (ctx) => {
         }
       );
 
-      // FIX-CANCEL: guarda ID separado para a mensagem de foto do deposito
+      // Guarda ID da mensagem de foto do deposito
       session.depositMessageId = depositMsg.message_id;
       session.mainMessageId = depositMsg.message_id;
 
