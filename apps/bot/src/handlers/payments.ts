@@ -9,6 +9,7 @@
  * FIX #1: schedulePIXExpiry usa Redis TTL como fonte de verdade para detectar
  *         expiração resistente a restarts (verifica status na API ao invés de
  *         depender somente do setTimeout em memória).
+ *         pixExpiresAt é salvo na sessão para re-agendamento no /start.
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -121,6 +122,8 @@ export async function executePayment(
     const session = await getSession(userId);
     session.paymentId = payment.paymentId;
     session.step = 'awaiting_payment';
+    // FIX #1: persiste a data de expiração no Redis para re-agendamento após restart
+    session.pixExpiresAt = payment.expiresAt;
     await saveSession(userId, session);
 
     if (payment.paidWithBalance) {
@@ -183,13 +186,13 @@ export async function executePayment(
     updatedSession.mainMessageId = qrMsg.message_id;
     await saveSession(userId, updatedSession);
 
-    // FIX #1: setTimeout ainda serve como melhor esforço em instância única.
+    // FIX #1: setTimeout serve como melhor esforço em instância única.
     // A resistência a restart vem do Redis: ao receber /start, o bot re-agenda
     // o aviso para PIX em aberto que ainda não expiraram (ver index.ts).
     const effectiveChatId = chatId ?? userId;
     schedulePIXExpiry(userId, payment.paymentId, effectiveChatId, PIX_TIMEOUT_MS);
 
-    console.info(`[${paymentMethod}] PIX gerado para ${userId} | id: ${payment.paymentId}`);
+    console.info(`[${paymentMethod}] PIX gerado para ${userId} | id: ${payment.paymentId} | expira: ${payment.expiresAt}`);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : 'Erro desconhecido';
     const errStatus = (error as { statusCode?: number }).statusCode ?? 0;
@@ -245,11 +248,11 @@ export async function executePayment(
 // ─── Timeout de PIX ──────────────────────────────────────────────────────────
 
 /**
- * FIX #1: schedulePIXExpiry agora recebe o delayMs como parâmetro para
- * permitir re-agendamento com tempo restante calculado a partir do Redis.
+ * FIX #1: schedulePIXExpiry recebe delayMs como parâmetro para permitir
+ * re-agendamento com tempo restante calculado a partir do Redis (pixExpiresAt).
  *
  * Fluxo resistente a restart:
- *  1. Ao gerar PIX → salva paymentId + expiresAt na sessão (Redis, TTL 1h)
+ *  1. Ao gerar PIX → salva paymentId + pixExpiresAt na sessão (Redis, TTL 1h)
  *  2. schedulePIXExpiry dispara com o delay real
  *  3. Se o bot restartar → ao receber /start, index.ts lê a sessão do Redis,
  *     calcula o tempo restante e re-agenda schedulePIXExpiry se ainda pendente
@@ -271,12 +274,11 @@ export function schedulePIXExpiry(
       try {
         const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
         if (status === 'APPROVED' || status === 'CANCELLED') {
-          // Pagamento já foi resolvido — só limpa a sessão silenciosamente
           await clearSession(userId, session.firstName);
           return;
         }
       } catch {
-        // API inacessível — avia mesmo assim para não deixar o usuário esperando
+        // API inacessível — avisa mesmo assim para não deixar o usuário esperando
       }
 
       await _bot.telegram
@@ -301,7 +303,6 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
     // SEC FIX #6: passa telegramId para validação de ownership na API
     const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
 
-    // Limpa sessão se o pagamento foi resolvido
     if (status === 'EXPIRED' || status === 'CANCELLED' || status === 'APPROVED') {
       await clearSession(userId);
     }
@@ -369,7 +370,6 @@ export async function handleCancelPayment(ctx: Context, paymentId: string): Prom
     console.warn(`[cancelPayment] Não foi possível cancelar ${paymentId}:`, error);
   }
 
-  // FIX #7: clearSession e releaseLock em ordem garantida com try/finally
   try {
     await deletePhotoAndReply(ctx, session, userId, '❌ *Pagamento cancelado\.* \n\nVolte quando quiser\!', {
       reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup,

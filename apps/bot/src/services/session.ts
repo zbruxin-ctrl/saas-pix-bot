@@ -4,6 +4,8 @@
  * TTL: 1 hora de inatividade.
  *
  * P1 FIX: sessions migradas para Redis — sem perda de contexto em restart.
+ * FIX #1: campo pixExpiresAt adicionado — permite re-agendar o timer de
+ *         expiração do PIX ao receber /start após um restart do bot.
  */
 import { redis } from './redis';
 
@@ -11,6 +13,8 @@ export interface UserSession {
   step: 'idle' | 'selecting_product' | 'awaiting_payment' | 'awaiting_deposit_amount';
   selectedProductId?: string;
   paymentId?: string;
+  /** ISO string com a data/hora de expiração do PIX em aberto (FIX #1) */
+  pixExpiresAt?: string;
   depositPaymentId?: string;
   depositMessageId?: number;
   mainMessageId?: number;

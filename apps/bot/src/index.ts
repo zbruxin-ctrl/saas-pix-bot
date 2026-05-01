@@ -1,6 +1,9 @@
 /**
  * Ponto de entrada do bot — inicialização, registro de handlers e servidor webhook.
  * Toda a lógica de negócio está nos módulos em handlers/ e services/.
+ *
+ * FIX #1: ao receber /start, re-agenda o timer de expiração do PIX para
+ *         usuários com pagamento em aberto (resistência a restarts via Redis).
  */
 
 // Sentry DEVE ser o primeiro import — captura erros desde o início
@@ -25,6 +28,7 @@ import {
   handleCheckPayment,
   handleCancelPayment,
   showPaymentMethodScreen,
+  schedulePIXExpiry,
 } from './handlers/payments';
 
 import type { ProductDTO } from '@saas-pix/shared';
@@ -41,6 +45,18 @@ bot.command('start', async (ctx) => {
   const existing = await getSession(userId);
 
   if (existing.step === 'awaiting_payment' && existing.paymentId) {
+    // FIX #1: re-agenda o timer de expiração usando o tempo restante do Redis
+    if (existing.pixExpiresAt) {
+      const remaining = new Date(existing.pixExpiresAt).getTime() - Date.now();
+      if (remaining > 0) {
+        const chatId = ctx.chat?.id ?? userId;
+        schedulePIXExpiry(userId, existing.paymentId, chatId, remaining);
+        console.info(
+          `[/start] PIX re-agendado para userId ${userId} | paymentId: ${existing.paymentId} | restam: ${Math.round(remaining / 1000)}s`
+        );
+      }
+    }
+
     await ctx.reply(
       '⚠️ Você tem um *pagamento PIX em andamento*\!\n\n' +
       'Use os botões acima para verificar ou cancelar\.\n' +
