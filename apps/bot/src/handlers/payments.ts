@@ -4,6 +4,7 @@
  *
  * P2 FIX: timeout PIX usando Redis TTL — usuário recebe aviso ao expirar.
  * P3 FIX: /start durante pagamento preserva sessão (no index.ts).
+ * SEC FIX: cancelPayment valida ownership do paymentId antes de cancelar.
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -12,6 +13,7 @@ import { editOrReply, deletePhotoAndReply } from '../utils/helpers';
 import { getSession, saveSession, clearSession } from '../services/session';
 import { acquireLock, releaseLock } from '../services/locks';
 import { apiClient } from '../services/apiClient';
+import { captureError } from '../config/sentry';
 import { showBlockedMessage } from './navigation';
 import type { ProductDTO } from '@saas-pix/shared';
 
@@ -186,6 +188,7 @@ export async function executePayment(
     const errMsg = error instanceof Error ? error.message : 'Erro desconhecido';
     const errStatus = (error as { statusCode?: number }).statusCode ?? 0;
     console.error(`[executePayment] Erro (${paymentMethod}) para ${userId}:`, error);
+    captureError(error, { handler: 'executePayment', paymentMethod, userId, productId });
 
     if (errStatus === 403 || errMsg.toLowerCase().includes('suspensa')) {
       await showBlockedMessage(ctx);
@@ -235,11 +238,6 @@ export async function executePayment(
 
 // ─── Timeout de PIX ──────────────────────────────────────────────────────────
 
-/**
- * P2 FIX: schedulePIXExpiry agora recebe chatId resolvido (nunca undefined).
- * Em instâncias únicas o setTimeout funciona bem. Para múltiplas instâncias
- * o ideal futuro é usar um job externo (BullMQ/cron), mas por ora está correto.
- */
 function schedulePIXExpiry(userId: number, paymentId: string, chatId: number): void {
   setTimeout(async () => {
     try {
@@ -249,9 +247,7 @@ function schedulePIXExpiry(userId: number, paymentId: string, chatId: number): v
           chatId,
           '⌛ Seu PIX expirou\. Use /start para gerar um novo\.',
           { parse_mode: 'MarkdownV2' }
-        ).catch(() => {
-          // usuário pode ter bloqueado o bot
-        });
+        ).catch(() => {});
         await clearSession(userId, session.firstName);
       }
     } catch (err) {
@@ -265,6 +261,12 @@ function schedulePIXExpiry(userId: number, paymentId: string, chatId: number): v
 export async function handleCheckPayment(ctx: Context, paymentId: string): Promise<void> {
   try {
     const { status } = await apiClient.getPaymentStatus(paymentId);
+
+    // Se expirou, limpa a sessão automaticamente
+    if (status === 'EXPIRED' || status === 'CANCELLED') {
+      await clearSession(ctx.from!.id);
+    }
+
     const statusMessages: Record<string, string> = {
       PENDING:
         '⏳ *Pagamento pendente*\n\nAinda não identificamos seu pagamento\. Se já pagou, aguarde alguns segundos e verifique novamente\.',
@@ -303,8 +305,16 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
 
 export async function handleCancelPayment(ctx: Context, paymentId: string): Promise<void> {
   const userId = ctx.from!.id;
-  const lockKey = `cancel:${paymentId}`;
 
+  // SEC FIX #2: Verifica ownership — só o dono do pagamento pode cancelar
+  const session = await getSession(userId);
+  if (session.paymentId !== paymentId) {
+    await ctx.answerCbQuery('⚠️ Ação não autorizada.', { show_alert: true }).catch(() => {});
+    console.warn(`[cancelPayment] userId ${userId} tentou cancelar paymentId ${paymentId} que não é dele (sessão: ${session.paymentId})`);
+    return;
+  }
+
+  const lockKey = `cancel:${paymentId}`;
   const acquired = await acquireLock(lockKey, 15);
   if (!acquired) {
     await ctx.answerCbQuery('⏳ Cancelamento já em andamento\.', { show_alert: false }).catch(() => {});
@@ -319,12 +329,13 @@ export async function handleCancelPayment(ctx: Context, paymentId: string): Prom
     console.warn(`[cancelPayment] Não foi possível cancelar ${paymentId}:`, error);
   }
 
-  const session = await getSession(userId);
-
-  await deletePhotoAndReply(ctx, session, userId, '❌ *Pagamento cancelado\.* \n\nVolte quando quiser\!', {
-    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup,
-  });
-
-  await clearSession(userId, session.firstName);
-  await releaseLock(lockKey);
+  // FIX #7: clearSession e releaseLock em ordem garantida com try/finally
+  try {
+    await deletePhotoAndReply(ctx, session, userId, '❌ *Pagamento cancelado\.* \n\nVolte quando quiser\!', {
+      reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup,
+    });
+    await clearSession(userId, session.firstName);
+  } finally {
+    await releaseLock(lockKey);
+  }
 }

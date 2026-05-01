@@ -1,5 +1,8 @@
 /**
- * Middleware global: modo manutenção + bloqueio de usuário.
+ * Middleware global: rate limit + modo manutenção + bloqueio de usuário.
+ *
+ * SEC FIX #5: rate limit por userId (máx 2 req/s) para prevenir flood.
+ * PERF FIX #4: BOT_CONFIG_CACHE_TTL aumentado para 30s em produção.
  */
 import { Context, Middleware } from 'telegraf';
 import { escapeMd } from '../utils/escape';
@@ -7,6 +10,7 @@ import { editOrReply } from '../utils/helpers';
 import { getSession, saveSession } from '../services/session';
 import { apiClient } from '../services/apiClient';
 import { showBlockedMessage } from './navigation';
+import { env } from '../config/env';
 
 const BLOCKED_ALLOWED_ACTIONS = new Set([
   'show_balance',
@@ -15,9 +19,32 @@ const BLOCKED_ALLOWED_ACTIONS = new Set([
   'show_home',
 ]);
 
+// Rate limit: máx 1 request a cada 500ms por usuário (2 req/s)
+const rateLimitMap = new Map<number, number>();
+const RATE_LIMIT_MS = 500;
+
+// Limpa entradas antigas do rate limit a cada 5 minutos para não vazar memória
+setInterval(() => {
+  const cutoff = Date.now() - 60_000;
+  for (const [uid, ts] of rateLimitMap.entries()) {
+    if (ts < cutoff) rateLimitMap.delete(uid);
+  }
+}, 5 * 60 * 1000);
+
 export const globalMiddleware: Middleware<Context> = async (ctx, next) => {
   const userId = ctx.from?.id;
   if (!userId) return next();
+
+  // ── Rate limit ───────────────────────────────────────────────────────────
+  const lastRequest = rateLimitMap.get(userId) ?? 0;
+  const now = Date.now();
+  if (now - lastRequest < RATE_LIMIT_MS) {
+    if ('callbackQuery' in ctx && ctx.callbackQuery) {
+      await ctx.answerCbQuery('⚠️ Devagar! Aguarde um instante.').catch(() => {});
+    }
+    return;
+  }
+  rateLimitMap.set(userId, now);
 
   let config: { maintenanceMode: boolean; maintenanceMessage: string; isBlocked: boolean };
   try {
