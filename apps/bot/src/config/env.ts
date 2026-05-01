@@ -6,18 +6,16 @@ const EnvSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_BOT_SECRET: z.string().optional(),
   BOT_WEBHOOK_URL: z.string().url().optional(),
-  /** URL base da API interna (aceita tanto API_URL quanto API_BASE_URL para compatibilidade) */
   API_URL: z.string().url().optional(),
   API_BASE_URL: z.string().url().optional(),
-  API_SECRET: z.string().min(1),
-  /** Upstash Redis — obrigatório em produção, opcional em dev (usa fallback em memória) */
+  // API_SECRET nao e usada pelo bot (autenticacao e via TELEGRAM_BOT_SECRET)
+  API_SECRET: z.string().optional(),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
   REDIS_URL: z.string().optional(),
   SENTRY_DSN: z.string().url().optional(),
 }).transform((v) => ({
   ...v,
-  // Normaliza: usa API_URL se existir, senão API_BASE_URL
   API_URL: v.API_URL ?? v.API_BASE_URL ?? '',
 }));
 
