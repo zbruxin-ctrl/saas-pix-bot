@@ -2,13 +2,12 @@
  * Ponto de entrada do bot — inicialização, registro de handlers e servidor webhook.
  * Toda a lógica de negócio está nos módulos em handlers/ e services/.
  *
+ * PADRÃO: parse_mode HTML em todas as mensagens de texto.
  * FIX #1: ao receber /start, re-agenda o timer de expiração do PIX para
  *         usuários com pagamento em aberto (resistência a restarts via Redis).
  * BUG FIX: todos os handlers têm try/catch global para nunca silenciar o bot.
- * FIX-BUILD: fallback do getSession usa UserSession para firstName.
  */
 
-// Sentry DEVE ser o primeiro import — captura erros desde o início
 import { initSentry, captureError } from './config/sentry';
 initSentry();
 
@@ -64,10 +63,10 @@ bot.command('start', async (ctx) => {
       }
 
       await ctx.reply(
-        '⚠️ Você tem um *pagamento PIX em andamento*\!\n\n' +
-        'Use os botões acima para verificar ou cancelar\.\n' +
-        'Ou aguarde expirar automaticamente em 30 minutos\.',
-        { parse_mode: 'MarkdownV2' }
+        '⚠️ Você tem um <b>pagamento PIX em andamento</b>!\n\n' +
+        'Use os botões acima para verificar ou cancelar.\n' +
+        'Ou aguarde expirar automaticamente em 30 minutos.',
+        { parse_mode: 'HTML' }
       );
       return;
     }
@@ -81,7 +80,7 @@ bot.command('start', async (ctx) => {
   } catch (err) {
     captureError(err, { handler: 'start' });
     console.error('[/start] Erro inesperado:', err);
-    await ctx.reply('Olá\! Use /start para começar\.', { parse_mode: 'MarkdownV2' }).catch(() => {});
+    await ctx.reply('Olá! Use /start para começar.', { parse_mode: 'HTML' }).catch(() => {});
   }
 });
 
@@ -131,11 +130,11 @@ bot.action('deposit_balance', async (ctx) => {
     session.step = 'awaiting_deposit_amount';
     await saveSession(ctx.from!.id, session);
     await ctx.reply(
-      '💳 *Adicionar Saldo*\n\n' +
+      '💳 <b>Adicionar Saldo</b>\n\n' +
         'Digite o valor em reais que deseja depositar:\n' +
-        '_\(mínimo R\$ 1,00 \| máximo R\$ 10\.000,00\)_\n\n' +
-        'Exemplo: `25` ou `50.00`',
-      { parse_mode: 'MarkdownV2' }
+        '<i>(mínimo R$ 1,00 | máximo R$ 10.000,00)</i>\n\n' +
+        'Exemplo: <code>25</code> ou <code>50.00</code>',
+      { parse_mode: 'HTML' }
     );
   } catch (err) {
     captureError(err, { handler: 'deposit_balance' });
@@ -164,17 +163,17 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
       await saveSession(userId, session);
     } catch (err) {
       captureError(err, { handler: 'select_product', productId, userId });
-      await ctx.reply('❌ Erro ao buscar produto\. Tente novamente\.', { parse_mode: 'MarkdownV2' });
+      await ctx.reply('❌ Erro ao buscar produto. Tente novamente.', { parse_mode: 'HTML' });
       return;
     }
 
     if (!product) {
-      await ctx.reply('❌ Produto não encontrado\.', { parse_mode: 'MarkdownV2' });
+      await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
       return;
     }
 
     if (product.stock != null && product.stock <= 0) {
-      await ctx.reply('⚠️ Este produto está esgotado no momento\.', { parse_mode: 'MarkdownV2' });
+      await ctx.reply('⚠️ Este produto está esgotado no momento.', { parse_mode: 'HTML' });
       return;
     }
 
@@ -222,10 +221,7 @@ bot.on(message('text'), async (ctx) => {
       return;
     }
 
-    await ctx.reply(
-      'Use /start para acessar o menu principal\.',
-      { parse_mode: 'MarkdownV2' }
-    );
+    await ctx.reply('Use /start para acessar o menu principal.', { parse_mode: 'HTML' });
   } catch (err) {
     captureError(err, { handler: 'text_message' });
     console.error('[text] Erro inesperado:', err);
@@ -240,7 +236,6 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', bot: bot.botInfo?.username ?? 'loading' });
 });
 
-// Endpoint para invalidar cache (chamado pela API após mudanças)
 app.post('/invalidate-cache', (req, res) => {
   const secret = req.headers['x-bot-secret'];
   if (secret !== env.TELEGRAM_BOT_SECRET) {

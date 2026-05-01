@@ -2,6 +2,9 @@
  * Handlers de pagamento: seleção de produto, execução de pagamento (PIX/Saldo/Misto),
  * verificação de status, cancelamento e timeout de PIX.
  *
+ * PADRÃO: parse_mode HTML em mensagens de texto.
+ *         parse_mode MarkdownV2 APENAS em captions de replyWithPhoto.
+ *
  * P2 FIX: timeout PIX usando Redis TTL — usuário recebe aviso ao expirar.
  * P3 FIX: /start durante pagamento preserva sessão (no index.ts).
  * SEC FIX #2: cancelPayment valida ownership do paymentId antes de cancelar.
@@ -15,7 +18,7 @@
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
-import { escapeMd } from '../utils/escape';
+import { escapeHtml, escapeMd } from '../utils/escape';
 import { editOrReply, deletePhotoAndReply } from '../utils/helpers';
 import { getSession, saveSession, clearSession } from '../services/session';
 import { acquireLock, releaseLock } from '../services/locks';
@@ -55,33 +58,33 @@ export async function showPaymentMethodScreen(
   const price = Number(product.price);
   const balanceStr = balance.toFixed(2);
   const descLine = product.description
-    ? `\n📝 _${escapeMd(product.description)}_\n`
+    ? `\n📝 <i>${escapeHtml(product.description)}</i>\n`
     : '';
 
   const confirmMessage =
-    `📦 *${escapeMd(product.name)}*${descLine}\n` +
+    `📦 <b>${escapeHtml(product.name)}</b>${descLine}\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `💰 *Valor:* R$ ${escapeMd(price.toFixed(2))}\n` +
-    `🏦 *Seu saldo:* R$ ${escapeMd(balanceStr)}\n\n` +
-    `*Como deseja pagar?*`;
+    `💰 <b>Valor:</b> R$ ${escapeHtml(price.toFixed(2))}\n` +
+    `🏦 <b>Seu saldo:</b> R$ ${escapeHtml(balanceStr)}\n\n` +
+    `<b>Como deseja pagar?</b>`;
 
   const buttons = [];
 
   if (balance >= price) {
     buttons.push([
-      Markup.button.callback(`💰 Só Saldo  \(R$ ${price.toFixed(2)}\)`, `pay_balance_${product.id}`),
+      Markup.button.callback(`💰 Só Saldo  (R$ ${price.toFixed(2)})`, `pay_balance_${product.id}`),
     ]);
   }
 
   buttons.push([
-    Markup.button.callback(`📱 Só PIX  \(R$ ${price.toFixed(2)}\)`, `pay_pix_${product.id}`),
+    Markup.button.callback(`📱 Só PIX  (R$ ${price.toFixed(2)})`, `pay_pix_${product.id}`),
   ]);
 
   if (balance > 0 && balance < price) {
     const pixDiff = (price - balance).toFixed(2);
     buttons.push([
       Markup.button.callback(
-        `🔀 Saldo \+ PIX  \(saldo R$ ${balanceStr} \+ PIX R$ ${pixDiff}\)`,
+        `🔀 Saldo + PIX  (saldo R$ ${balanceStr} + PIX R$ ${pixDiff})`,
         `pay_mixed_${product.id}`
       ),
     ]);
@@ -90,6 +93,7 @@ export async function showPaymentMethodScreen(
   buttons.push([Markup.button.callback('◀️ Voltar', 'show_products')]);
 
   await editOrReply(ctx, confirmMessage, {
+    parse_mode: 'HTML',
     reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
   });
 }
@@ -116,7 +120,7 @@ export async function executePayment(
   }
 
   try {
-    await editOrReply(ctx, '⏳ Processando sua compra, aguarde\.\.\.');
+    await editOrReply(ctx, '⏳ Processando sua compra, aguarde...', { parse_mode: 'HTML' });
 
     const payment = await apiClient.createPayment({
       telegramId: String(userId),
@@ -136,11 +140,12 @@ export async function executePayment(
     if (payment.paidWithBalance) {
       await editOrReply(
         ctx,
-        `✅ *Compra realizada com saldo\!*\n\n` +
-          `📦 *Produto:* ${escapeMd(payment.productName)}\n` +
-          `💰 *Valor debitado:* R$ ${escapeMd(Number(payment.amount).toFixed(2))}\n\n` +
-          `Seu produto será entregue em instantes\! 🚀`,
+        `✅ <b>Compra realizada com saldo!</b>\n\n` +
+          `📦 <b>Produto:</b> ${escapeHtml(payment.productName)}\n` +
+          `💰 <b>Valor debitado:</b> R$ ${escapeHtml(Number(payment.amount).toFixed(2))}\n\n` +
+          `Seu produto será entregue em instantes! 🚀`,
         {
+          parse_mode: 'HTML',
           reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('🏠 Menu Inicial', 'show_home')],
             [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
@@ -163,6 +168,7 @@ export async function executePayment(
       : '';
 
     const qrBuffer = Buffer.from(payment.pixQrCode, 'base64');
+    // caption de foto usa MarkdownV2 (limitação do Telegram para mídia)
     const caption =
       `💳 *Pagamento PIX Gerado\!*\n\n` +
       `📦 *Produto:* ${escapeMd(payment.productName)}\n` +
@@ -193,9 +199,6 @@ export async function executePayment(
     updatedSession.mainMessageId = qrMsg.message_id;
     await saveSession(userId, updatedSession);
 
-    // FIX #1: setTimeout serve como melhor esforço em instância única.
-    // A resistência a restart vem do Redis: ao receber /start, o bot re-agenda
-    // o aviso para PIX em aberto que ainda não expiraram (ver index.ts).
     const effectiveChatId = chatId ?? userId;
     schedulePIXExpiry(userId, payment.paymentId, effectiveChatId, PIX_TIMEOUT_MS);
 
@@ -214,8 +217,8 @@ export async function executePayment(
     if (errStatus === 503 || errMsg.toLowerCase().includes('manutencao') || errMsg.toLowerCase().includes('manutenção')) {
       await editOrReply(
         ctx,
-        `🛠️ *Manutenção em Andamento*\n\n${escapeMd(errMsg)}\n\n_Tente novamente em alguns instantes\!_ 😊`,
-        { reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup }
+        `🛠️ <b>Manutenção em Andamento</b>\n\n${escapeHtml(errMsg)}\n\n<i>Tente novamente em alguns instantes! 😊</i>`,
+        { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup }
       );
       return;
     }
@@ -223,8 +226,9 @@ export async function executePayment(
     if (errMsg.toLowerCase().includes('saldo insuficiente')) {
       await editOrReply(
         ctx,
-        `❌ *${escapeMd(errMsg)}*\n\nEscolha outra forma de pagamento ou adicione saldo\.`,
+        `❌ <b>${escapeHtml(errMsg)}</b>\n\nEscolha outra forma de pagamento ou adicione saldo.`,
         {
+          parse_mode: 'HTML',
           reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('➕ Adicionar Saldo', 'deposit_balance')],
             [Markup.button.callback('◀️ Voltar', `select_product_${productId}`)],
@@ -238,9 +242,10 @@ export async function executePayment(
     await editOrReply(
       ctx,
       isTimeout
-        ? `⏳ *Demorou um pouquinho mais que o esperado\.\.\.*\n\nClique em *Tentar Novamente* abaixo 😊`
-        : `⚠️ *Algo deu errado ao gerar o PIX*\n\nSeu dinheiro não foi cobrado\.\nClique em *Tentar Novamente*\.`,
+        ? `⏳ <b>Demorou um pouquinho mais que o esperado...</b>\n\nClique em <b>Tentar Novamente</b> abaixo 😊`
+        : `⚠️ <b>Algo deu errado ao gerar o PIX</b>\n\nSeu dinheiro não foi cobrado.\nClique em <b>Tentar Novamente</b>.`,
       {
+        parse_mode: 'HTML',
         reply_markup: Markup.inlineKeyboard([
           [Markup.button.callback('🔄 Tentar Novamente', `select_product_${productId}`)],
           [Markup.button.callback('◀️ Voltar', 'show_products')],
@@ -254,10 +259,6 @@ export async function executePayment(
 
 // ─── Timeout de PIX ──────────────────────────────────────────────────────────
 
-/**
- * FIX #1: schedulePIXExpiry recebe delayMs como parâmetro para permitir
- * re-agendamento com tempo restante calculado a partir do Redis (pixExpiresAt).
- */
 export function schedulePIXExpiry(
   userId: number,
   paymentId: string,
@@ -269,7 +270,6 @@ export function schedulePIXExpiry(
       const session = await getSession(userId);
       if (session.step !== 'awaiting_payment' || session.paymentId !== paymentId) return;
 
-      // Consulta status real na API antes de avisar (evita falso alarme pós-restart)
       try {
         const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
         if (status === 'APPROVED' || status === 'CANCELLED') {
@@ -277,15 +277,11 @@ export function schedulePIXExpiry(
           return;
         }
       } catch {
-        // API inacessível — avisa mesmo assim para não deixar o usuário esperando
+        // API inacessível — avisa mesmo assim
       }
 
       await _bot.telegram
-        .sendMessage(
-          chatId,
-          '⌛ Seu PIX expirou\. Use /start para gerar um novo\.',
-          { parse_mode: 'MarkdownV2' }
-        )
+        .sendMessage(chatId, '⌛ Seu PIX expirou. Use /start para gerar um novo.', { parse_mode: 'HTML' })
         .catch(() => {});
       await clearSession(userId, session.firstName);
     } catch (err) {
@@ -299,13 +295,9 @@ export function schedulePIXExpiry(
 export async function handleCheckPayment(ctx: Context, paymentId: string): Promise<void> {
   const userId = ctx.from!.id;
 
-  // CRÍTICO: responde o cbQuery IMEDIATAMENTE antes de qualquer operação async.
-  // Se demorar mais de 30s sem resposta, o Telegram marca o bot como "não responsivo"
-  // e para de entregar updates para aquele usuário.
   await ctx.answerCbQuery('🔄 Verificando...').catch(() => {});
 
   try {
-    // SEC FIX #6: passa telegramId para validação de ownership na API
     const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
 
     if (status === 'EXPIRED' || status === 'CANCELLED' || status === 'APPROVED') {
@@ -314,13 +306,13 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
 
     const statusMessages: Record<string, string> = {
       PENDING:
-        '⏳ *Pagamento pendente*\n\nAinda não identificamos seu pagamento\. Se já pagou, aguarde alguns segundos e verifique novamente\.',
+        '⏳ <b>Pagamento pendente</b>\n\nAinda não identificamos seu pagamento. Se já pagou, aguarde alguns segundos e verifique novamente.',
       APPROVED:
-        '✅ *Pagamento aprovado\!*\n\nSeu acesso está sendo liberado\. Você receberá uma mensagem em instantes\.',
+        '✅ <b>Pagamento aprovado!</b>\n\nSeu acesso está sendo liberado. Você receberá uma mensagem em instantes.',
       REJECTED:
-        '❌ *Pagamento rejeitado*\n\nHouve um problema com seu pagamento\. Por favor, tente novamente\.',
-      CANCELLED: '❌ *Pagamento cancelado*\n\nEste pagamento foi cancelado\.',
-      EXPIRED: '⌛ *Pagamento expirado*\n\nO código PIX expirou\. Gere um novo pagamento\.',
+        '❌ <b>Pagamento rejeitado</b>\n\nHouve um problema com seu pagamento. Por favor, tente novamente.',
+      CANCELLED: '❌ <b>Pagamento cancelado</b>\n\nEste pagamento foi cancelado.',
+      EXPIRED: '⌛ <b>Pagamento expirado</b>\n\nO código PIX expirou. Gere um novo pagamento.',
     };
 
     const msg = statusMessages[status] || '❓ Status desconhecido';
@@ -329,12 +321,14 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
       msg,
       status === 'PENDING'
         ? {
+            parse_mode: 'HTML',
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('🔄 Verificar Novamente', `check_payment_${paymentId}`)],
               [Markup.button.callback('❌ Cancelar', `cancel_payment_${paymentId}`)],
             ]).reply_markup,
           }
         : {
+            parse_mode: 'HTML',
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('🏠 Menu Inicial', 'show_home')],
               [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
@@ -343,9 +337,8 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
     );
   } catch (err) {
     console.error('[handleCheckPayment] Erro ao verificar pagamento:', err);
-    // Envia mensagem de erro em vez de silenciar
-    await ctx.reply('⚠️ Erro ao verificar pagamento\. Tente novamente\.', {
-      parse_mode: 'MarkdownV2',
+    await ctx.reply('⚠️ Erro ao verificar pagamento. Tente novamente.', {
+      parse_mode: 'HTML',
     }).catch(() => {});
   }
 }
@@ -355,40 +348,38 @@ export async function handleCheckPayment(ctx: Context, paymentId: string): Promi
 export async function handleCancelPayment(ctx: Context, paymentId: string): Promise<void> {
   const userId = ctx.from!.id;
 
-  // CRÍTICO: responde o cbQuery IMEDIATAMENTE antes de qualquer operação async
   await ctx.answerCbQuery('❌ Cancelando...').catch(() => {});
 
-  // SEC FIX #2: Verifica ownership — só o dono do pagamento pode cancelar
   const session = await getSession(userId);
   if (session.paymentId !== paymentId) {
     console.warn(`[cancelPayment] userId ${userId} tentou cancelar paymentId ${paymentId} que não é dele (sessão: ${session.paymentId})`);
-    await ctx.reply('⚠️ Ação não autorizada\.', { parse_mode: 'MarkdownV2' }).catch(() => {});
+    await ctx.reply('⚠️ Ação não autorizada.', { parse_mode: 'HTML' }).catch(() => {});
     return;
   }
 
   const lockKey = `cancel:${paymentId}`;
   const acquired = await acquireLock(lockKey, 15);
   if (!acquired) {
-    await ctx.reply('⏳ Cancelamento já em andamento\.', { parse_mode: 'MarkdownV2' }).catch(() => {});
+    await ctx.reply('⏳ Cancelamento já em andamento.', { parse_mode: 'HTML' }).catch(() => {});
     return;
   }
 
   try {
-    // SEC FIX #6: passa telegramId para que a API valide ownership também
     await apiClient.cancelPayment(paymentId, String(userId));
   } catch (error) {
     console.warn(`[cancelPayment] Não foi possível cancelar ${paymentId}:`, error);
   }
 
   try {
-    await deletePhotoAndReply(ctx, session, userId, '❌ *Pagamento cancelado\.* \n\nVolte quando quiser\!', {
+    await deletePhotoAndReply(ctx, session, userId, '❌ <b>Pagamento cancelado.</b>\n\nVolte quando quiser!', {
+      parse_mode: 'HTML',
       reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup,
     });
     await clearSession(userId, session.firstName);
   } catch (err) {
     console.error('[handleCancelPayment] Erro ao finalizar cancelamento:', err);
-    await ctx.reply('❌ *Pagamento cancelado\.* Volte quando quiser\!', {
-      parse_mode: 'MarkdownV2',
+    await ctx.reply('❌ <b>Pagamento cancelado.</b> Volte quando quiser!', {
+      parse_mode: 'HTML',
       reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu Inicial', 'show_home')]]).reply_markup,
     }).catch(() => {});
     await clearSession(userId, session.firstName).catch(() => {});

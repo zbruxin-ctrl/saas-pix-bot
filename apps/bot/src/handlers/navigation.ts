@@ -1,6 +1,6 @@
 /**
  * Handlers de navegação: home, produtos, pedidos, ajuda e mensagem de conta bloqueada.
- * Usa parse_mode HTML — mais simples e sem bugs de escape duplo do MarkdownV2.
+ * PADRÃO: parse_mode HTML em todas as mensagens.
  */
 import { Context, Markup } from 'telegraf';
 import { escapeHtml } from '../utils/escape';

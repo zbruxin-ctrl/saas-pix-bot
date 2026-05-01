@@ -1,6 +1,7 @@
 /**
  * Helpers reutilizáveis para edição/envio de mensagens no Telegram.
- * Todos usam MarkdownV2 por padrão (mais robusto que Markdown legado).
+ * PADRÃO: parse_mode HTML em todo o projeto — nunca MarkdownV2.
+ * O editOrReply NÃO impõe parse_mode padrão; cada caller decide o seu.
  */
 import { Context, Markup } from 'telegraf';
 import type { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
@@ -8,33 +9,20 @@ import { getSession, saveSession, UserSession } from '../services/session';
 
 /**
  * Edita a mensagem principal do usuário (mainMessageId) ou envia nova.
- * Usa MarkdownV2.
+ * parse_mode deve ser passado explicitamente pelo caller (padrão: HTML).
  */
 export async function editOrReply(
   ctx: Context,
   text: string,
-  extra?: ExtraEditMessageText
+  extra: ExtraEditMessageText = { parse_mode: 'HTML' }
 ): Promise<void> {
   const userId = ctx.from!.id;
   const session = await getSession(userId);
-  const chatId = ctx.chat?.id;
-
-  if (!chatId) {
-    const sent = await ctx.telegram.sendMessage(userId, text, {
-      parse_mode: 'MarkdownV2',
-      ...(extra as object),
-    });
-    session.mainMessageId = sent.message_id;
-    await saveSession(userId, session);
-    return;
-  }
+  const chatId = ctx.chat?.id ?? userId;
 
   if (session.mainMessageId) {
     try {
-      await ctx.telegram.editMessageText(chatId, session.mainMessageId, undefined, text, {
-        parse_mode: 'MarkdownV2',
-        ...extra,
-      });
+      await ctx.telegram.editMessageText(chatId, session.mainMessageId, undefined, text, extra);
       return;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '';
@@ -48,10 +36,7 @@ export async function editOrReply(
     }
   }
 
-  const sent = await ctx.telegram.sendMessage(chatId, text, {
-    parse_mode: 'MarkdownV2',
-    ...(extra as object),
-  });
+  const sent = await ctx.telegram.sendMessage(chatId, text, extra);
   session.mainMessageId = sent.message_id;
   await saveSession(userId, session);
 }
@@ -65,18 +50,9 @@ export async function deletePhotoAndReply(
   session: UserSession,
   userId: number,
   text: string,
-  extra?: ExtraEditMessageText
+  extra: ExtraEditMessageText = { parse_mode: 'HTML' }
 ): Promise<void> {
-  const chatId = ctx.chat?.id;
-  if (!chatId) {
-    const sent = await ctx.telegram.sendMessage(userId, text, {
-      parse_mode: 'MarkdownV2',
-      ...(extra as object),
-    });
-    session.mainMessageId = sent.message_id;
-    session.depositMessageId = undefined;
-    return;
-  }
+  const chatId = ctx.chat?.id ?? userId;
 
   const photoMsgId = session.depositMessageId ?? session.mainMessageId;
   if (photoMsgId) {
@@ -85,10 +61,7 @@ export async function deletePhotoAndReply(
     session.depositMessageId = undefined;
   }
 
-  const sent = await ctx.telegram.sendMessage(chatId, text, {
-    parse_mode: 'MarkdownV2',
-    ...(extra as object),
-  });
+  const sent = await ctx.telegram.sendMessage(chatId, text, extra);
   session.mainMessageId = sent.message_id;
   await saveSession(userId, session);
 }

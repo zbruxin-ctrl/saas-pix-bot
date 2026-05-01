@@ -1,8 +1,10 @@
 /**
  * Handlers de saldo: visualização, depósito via PIX.
+ * PADRÃO: parse_mode HTML em todas as mensagens de texto.
+ * Captions de replyWithPhoto usam MarkdownV2 (limitação do Telegram).
  */
 import { Context, Markup } from 'telegraf';
-import { escapeMd } from '../utils/escape';
+import { escapeHtml, escapeMd } from '../utils/escape';
 import { editOrReply } from '../utils/helpers';
 import { getSession, saveSession } from '../services/session';
 import { apiClient } from '../services/apiClient';
@@ -18,15 +20,15 @@ export async function showBalance(ctx: Context): Promise<void> {
       .slice(0, 5)
       .map((t) => {
         const sinal = t.type === 'DEPOSIT' ? '➕' : '➖';
-        return `${sinal} R$ ${Number(t.amount).toFixed(2)} — ${escapeMd(t.description)}`;
+        return `${sinal} R$ ${Number(t.amount).toFixed(2)} — ${escapeHtml(t.description)}`;
       })
       .join('\n');
 
     const texto =
-      `💰 *Seu Saldo*\n\n` +
-      `Disponível: *R$ ${escapeMd(Number(balance).toFixed(2))}*\n\n` +
-      (txLines ? `*Últimas transações:*\n${txLines}\n\n` : '_Nenhuma transação ainda\._ \n\n') +
-      `Use seu saldo para comprar sem precisar fazer PIX toda hora\!`;
+      `💰 <b>Seu Saldo</b>\n\n` +
+      `Disponível: <b>R$ ${escapeHtml(Number(balance).toFixed(2))}</b>\n\n` +
+      (txLines ? `<b>Últimas transações:</b>\n${txLines}\n\n` : '<i>Nenhuma transação ainda.</i>\n\n') +
+      `Use seu saldo para comprar sem precisar fazer PIX toda hora!`;
 
     const config = await apiClient.getBotConfig(String(userId)).catch(() => ({ isBlocked: false }));
     const buttons = config.isBlocked
@@ -40,11 +42,13 @@ export async function showBalance(ctx: Context): Promise<void> {
         ];
 
     await editOrReply(ctx, texto, {
+      parse_mode: 'HTML',
       reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
     });
   } catch (err) {
     console.error(`[showBalance] Erro para ${userId}:`, err);
-    await editOrReply(ctx, '❌ Erro ao buscar saldo\. Tente novamente\.', {
+    await editOrReply(ctx, '❌ Erro ao buscar saldo. Tente novamente.', {
+      parse_mode: 'HTML',
       reply_markup: Markup.inlineKeyboard([[Markup.button.callback('◀️ Voltar', 'show_home')]]).reply_markup,
     });
   }
@@ -58,8 +62,8 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
 
   if (isNaN(valor) || valor < 1 || valor > 10000) {
     await ctx.reply(
-      '❌ Valor inválido\. Digite um valor entre R\$ 1,00 e R\$ 10\.000,00\.\n\nExemplo: `25` ou `50.00`',
-      { parse_mode: 'MarkdownV2' }
+      '❌ Valor inválido. Digite um valor entre R$ 1,00 e R$ 10.000,00.\n\nExemplo: <code>25</code> ou <code>50.00</code>',
+      { parse_mode: 'HTML' }
     );
     return;
   }
@@ -67,7 +71,7 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
   session.step = 'idle';
   await saveSession(userId, session);
 
-  const processingMsg = await ctx.reply('⏳ Gerando PIX de depósito, aguarde\.\.\.', { parse_mode: 'MarkdownV2' });
+  const processingMsg = await ctx.reply('⏳ Gerando PIX de depósito, aguarde...', { parse_mode: 'HTML' });
 
   try {
     const deposit = await apiClient.createDeposit(String(userId), valor, ctx.from?.first_name, ctx.from?.username);
@@ -83,6 +87,7 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
     });
 
     const qrBuffer = Buffer.from(deposit.pixQrCode, 'base64');
+    // caption de foto usa MarkdownV2 (Telegram não aceita HTML em captions de mídia da mesma forma)
     const depositMsg = await ctx.replyWithPhoto(
       { source: qrBuffer },
       {
@@ -119,9 +124,9 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
     }
 
     await ctx.reply(
-      '❌ Erro ao gerar PIX de depósito\. Tente novamente\.',
+      '❌ Erro ao gerar PIX de depósito. Tente novamente.',
       {
-        parse_mode: 'MarkdownV2',
+        parse_mode: 'HTML',
         reply_markup: Markup.inlineKeyboard([[Markup.button.callback('◀️ Voltar', 'show_balance')]]).reply_markup,
       }
     );

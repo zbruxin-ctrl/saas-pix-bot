@@ -1,15 +1,15 @@
 /**
  * Middleware global: rate limit + modo manutenção + bloqueio de usuário.
+ * PADRÃO: parse_mode HTML em todas as mensagens.
  *
  * SEC FIX #5: rate limit por userId (máx 2 req/s) para prevenir flood.
  * PERF FIX #4: BOT_CONFIG_CACHE_TTL aumentado para 30s em produção.
  * BUG FIX: updates sem ctx.from (edited_message, channel_post, etc.) são
  *          ignorados com segurança — antes causavam falha silenciosa no bot.
  * BUG FIX: try/catch total no middleware para nunca travar o pipeline.
- * FIX-BUILD: tipo do fallback getSession agora usa UserSession para firstName.
  */
 import { Context, Middleware } from 'telegraf';
-import { escapeMd } from '../utils/escape';
+import { escapeHtml } from '../utils/escape';
 import { editOrReply } from '../utils/helpers';
 import { getSession, saveSession } from '../services/session';
 import type { UserSession } from '../services/session';
@@ -39,8 +39,6 @@ setInterval(() => {
 const emptySession = (): UserSession => ({ step: 'idle', lastActivityAt: Date.now() });
 
 export const globalMiddleware: Middleware<Context> = async (ctx, next) => {
-  // BUG FIX: updates sem from (edited_message, channel_post, inline_query, etc.)
-  // não têm userId — ignorar silenciosamente em vez de travar o pipeline.
   const userId = ctx.from?.id;
   if (!userId) return next();
 
@@ -60,26 +58,25 @@ export const globalMiddleware: Middleware<Context> = async (ctx, next) => {
     try {
       config = await apiClient.getBotConfig(String(userId));
     } catch {
-      // Se a API estiver indisponível, deixa o update passar normalmente
       return next();
     }
 
     // ── Modo manutenção ───────────────────────────────────────────────────────
     if (config.maintenanceMode) {
       const session = await getSession(userId).catch(emptySession);
-      const firstName = escapeMd(session.firstName || ctx.from?.first_name || 'visitante');
+      const firstName = escapeHtml(session.firstName || ctx.from?.first_name || 'visitante');
       const maintMsg = config.maintenanceMessage || 'Estamos em manutenção. Voltamos em breve!';
       const text =
-        `🛠️ *Manutenção em Andamento*\n\n` +
-        `Olá, *${firstName}*\!\n\n` +
-        `${escapeMd(maintMsg)}\n\n` +
-        `_Pedimos desculpas pelo inconveniente\. Em breve estaremos de volta\!_ 😊`;
+        `🛠️ <b>Manutenção em Andamento</b>\n\n` +
+        `Olá, <b>${firstName}</b>!\n\n` +
+        `${escapeHtml(maintMsg)}\n\n` +
+        `<i>Pedimos desculpas pelo inconveniente. Em breve estaremos de volta! 😊</i>`;
 
       if ('callbackQuery' in ctx && ctx.callbackQuery) {
         await ctx.answerCbQuery('🛠️ Bot em manutenção', { show_alert: true }).catch(() => {});
       }
 
-      await editOrReply(ctx, text);
+      await editOrReply(ctx, text, { parse_mode: 'HTML' });
       return;
     }
 
@@ -123,7 +120,6 @@ export const globalMiddleware: Middleware<Context> = async (ctx, next) => {
 
     return next();
   } catch (err) {
-    // Nunca deixar o middleware travar o pipeline inteiro
     console.error('[globalMiddleware] Erro inesperado — deixando passar:', err);
     return next();
   }
