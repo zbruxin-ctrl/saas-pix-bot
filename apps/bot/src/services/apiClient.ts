@@ -10,6 +10,8 @@
 //   com cache em memoria TTL 10s
 // FEAT-BLOCKED: getBotConfig(telegramId) tambem retorna isBlocked do usuario
 //   Cache invalidado apos cada chamada com telegramId diferente
+// SEC FIX #6: getPaymentStatus e cancelPayment agora enviam telegramId
+//   para que a API valide ownership antes de retornar/cancelar
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
 import type {
@@ -43,14 +45,13 @@ export function invalidateBalanceCache(telegramId: string): void {
   balanceCache.delete(telegramId);
 }
 
-// FEAT-MAINT + FEAT-BLOCKED: cache do bot-config por telegramId, TTL 10s
-// Chave: telegramId ou '__global__' quando nao ha telegramId
+// FEAT-MAINT + FEAT-BLOCKED: cache do bot-config por telegramId, TTL 30s em producao
 interface BotConfigCache {
   data: { maintenanceMode: boolean; maintenanceMessage: string; isBlocked: boolean };
   expiresAt: number;
 }
 const botConfigCache = new Map<string, BotConfigCache>();
-const BOT_CONFIG_CACHE_TTL = 10_000;
+const BOT_CONFIG_CACHE_TTL = 30_000; // FIX #4: aumentado de 10s para 30s
 
 export function invalidateBotConfigCache(telegramId?: string): void {
   if (telegramId) {
@@ -246,19 +247,28 @@ class ApiClient {
     return data.data!;
   }
 
-  async getPaymentStatus(paymentId: string): Promise<{ status: string; paymentId: string }> {
+  // SEC FIX #6: envia telegramId na query para que a API valide ownership
+  async getPaymentStatus(
+    paymentId: string,
+    telegramId: string
+  ): Promise<{ status: string; paymentId: string }> {
     const { data } = await this.withRetry(() =>
       this.client.get<ApiResponse<{ status: string; paymentId: string }>>(
-        `/api/payments/${paymentId}/status`
+        `/api/payments/${paymentId}/status?telegramId=${encodeURIComponent(telegramId)}`
       )
     );
     return data.data!;
   }
 
-  async cancelPayment(paymentId: string): Promise<{ cancelled: boolean; message: string }> {
+  // SEC FIX #6: envia telegramId no body para que a API valide ownership
+  async cancelPayment(
+    paymentId: string,
+    telegramId: string
+  ): Promise<{ cancelled: boolean; message: string }> {
     const { data } = await this.withRetry(() =>
       this.client.post<ApiResponse<{ cancelled: boolean; message: string }>>(
-        `/api/payments/${paymentId}/cancel`
+        `/api/payments/${paymentId}/cancel`,
+        { telegramId }
       )
     );
     return data.data!;

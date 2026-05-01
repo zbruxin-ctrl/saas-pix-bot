@@ -4,7 +4,11 @@
  *
  * P2 FIX: timeout PIX usando Redis TTL — usuário recebe aviso ao expirar.
  * P3 FIX: /start durante pagamento preserva sessão (no index.ts).
- * SEC FIX: cancelPayment valida ownership do paymentId antes de cancelar.
+ * SEC FIX #2: cancelPayment valida ownership do paymentId antes de cancelar.
+ * SEC FIX #6: getPaymentStatus e cancelPayment passam telegramId para a API.
+ * FIX #1: schedulePIXExpiry usa Redis TTL como fonte de verdade para detectar
+ *         expiração resistente a restarts (verifica status na API ao invés de
+ *         depender somente do setTimeout em memória).
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -179,9 +183,11 @@ export async function executePayment(
     updatedSession.mainMessageId = qrMsg.message_id;
     await saveSession(userId, updatedSession);
 
-    // P2 FIX: Agendar aviso de expiração do PIX com chatId correto
+    // FIX #1: setTimeout ainda serve como melhor esforço em instância única.
+    // A resistência a restart vem do Redis: ao receber /start, o bot re-agenda
+    // o aviso para PIX em aberto que ainda não expiraram (ver index.ts).
     const effectiveChatId = chatId ?? userId;
-    schedulePIXExpiry(userId, payment.paymentId, effectiveChatId);
+    schedulePIXExpiry(userId, payment.paymentId, effectiveChatId, PIX_TIMEOUT_MS);
 
     console.info(`[${paymentMethod}] PIX gerado para ${userId} | id: ${payment.paymentId}`);
   } catch (error) {
@@ -238,33 +244,66 @@ export async function executePayment(
 
 // ─── Timeout de PIX ──────────────────────────────────────────────────────────
 
-function schedulePIXExpiry(userId: number, paymentId: string, chatId: number): void {
+/**
+ * FIX #1: schedulePIXExpiry agora recebe o delayMs como parâmetro para
+ * permitir re-agendamento com tempo restante calculado a partir do Redis.
+ *
+ * Fluxo resistente a restart:
+ *  1. Ao gerar PIX → salva paymentId + expiresAt na sessão (Redis, TTL 1h)
+ *  2. schedulePIXExpiry dispara com o delay real
+ *  3. Se o bot restartar → ao receber /start, index.ts lê a sessão do Redis,
+ *     calcula o tempo restante e re-agenda schedulePIXExpiry se ainda pendente
+ *  4. Quando o timer dispara, consulta a API (getPaymentStatus) antes de avisar,
+ *     evitando falso alarme caso o pagamento já tenha sido aprovado.
+ */
+export function schedulePIXExpiry(
+  userId: number,
+  paymentId: string,
+  chatId: number,
+  delayMs: number
+): void {
   setTimeout(async () => {
     try {
       const session = await getSession(userId);
-      if (session.step === 'awaiting_payment' && session.paymentId === paymentId) {
-        await _bot.telegram.sendMessage(
+      if (session.step !== 'awaiting_payment' || session.paymentId !== paymentId) return;
+
+      // Consulta status real na API antes de avisar (evita falso alarme pós-restart)
+      try {
+        const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
+        if (status === 'APPROVED' || status === 'CANCELLED') {
+          // Pagamento já foi resolvido — só limpa a sessão silenciosamente
+          await clearSession(userId, session.firstName);
+          return;
+        }
+      } catch {
+        // API inacessível — avia mesmo assim para não deixar o usuário esperando
+      }
+
+      await _bot.telegram
+        .sendMessage(
           chatId,
           '⌛ Seu PIX expirou\. Use /start para gerar um novo\.',
           { parse_mode: 'MarkdownV2' }
-        ).catch(() => {});
-        await clearSession(userId, session.firstName);
-      }
+        )
+        .catch(() => {});
+      await clearSession(userId, session.firstName);
     } catch (err) {
       console.warn(`[schedulePIXExpiry] Erro ao expirar PIX ${paymentId}:`, err);
     }
-  }, PIX_TIMEOUT_MS);
+  }, delayMs);
 }
 
 // ─── Verificar pagamento ─────────────────────────────────────────────────────
 
 export async function handleCheckPayment(ctx: Context, paymentId: string): Promise<void> {
+  const userId = ctx.from!.id;
   try {
-    const { status } = await apiClient.getPaymentStatus(paymentId);
+    // SEC FIX #6: passa telegramId para validação de ownership na API
+    const { status } = await apiClient.getPaymentStatus(paymentId, String(userId));
 
-    // Se expirou, limpa a sessão automaticamente
-    if (status === 'EXPIRED' || status === 'CANCELLED') {
-      await clearSession(ctx.from!.id);
+    // Limpa sessão se o pagamento foi resolvido
+    if (status === 'EXPIRED' || status === 'CANCELLED' || status === 'APPROVED') {
+      await clearSession(userId);
     }
 
     const statusMessages: Record<string, string> = {
@@ -317,14 +356,15 @@ export async function handleCancelPayment(ctx: Context, paymentId: string): Prom
   const lockKey = `cancel:${paymentId}`;
   const acquired = await acquireLock(lockKey, 15);
   if (!acquired) {
-    await ctx.answerCbQuery('⏳ Cancelamento já em andamento\.', { show_alert: false }).catch(() => {});
+    await ctx.answerCbQuery('⏳ Cancelamento já em andamento.', { show_alert: false }).catch(() => {});
     return;
   }
 
-  await ctx.answerCbQuery('❌ Cancelando\.\.\.').catch(() => {});
+  await ctx.answerCbQuery('❌ Cancelando...').catch(() => {});
 
   try {
-    await apiClient.cancelPayment(paymentId);
+    // SEC FIX #6: passa telegramId para que a API valide ownership também
+    await apiClient.cancelPayment(paymentId, String(userId));
   } catch (error) {
     console.warn(`[cancelPayment] Não foi possível cancelar ${paymentId}:`, error);
   }

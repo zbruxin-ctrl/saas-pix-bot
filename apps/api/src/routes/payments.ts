@@ -11,6 +11,8 @@
 //   POST /create e POST /deposit retornam 503 quando maintenance_mode=true
 //   POST /create e POST /deposit retornam 403 quando usuario esta bloqueado
 // FEAT-BLOCKED: /bot-config inclui isBlocked do usuario (por telegramId query param)
+// SEC FIX #6: GET /:id/status e POST /:id/cancel agora exigem telegramId e
+//   verificam ownership antes de retornar/cancelar (impede consulta de pagamentos alheios)
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -53,6 +55,27 @@ async function isUserBlocked(telegramId: string): Promise<boolean> {
     select: { isBlocked: true },
   });
   return user?.isBlocked ?? false;
+}
+
+/**
+ * SEC FIX #6: Verifica se o pagamento pertence ao telegramId informado.
+ * Retorna o pagamento se pertencer, null caso contrário.
+ */
+async function getPaymentIfOwner(
+  paymentId: string,
+  telegramId: string
+): Promise<{ id: string } | null> {
+  const user = await prisma.telegramUser.findUnique({
+    where: { telegramId },
+    select: { id: true },
+  });
+  if (!user) return null;
+
+  const payment = await prisma.payment.findFirst({
+    where: { id: paymentId, telegramUserId: user.id },
+    select: { id: true },
+  });
+  return payment ?? null;
 }
 
 // ─── Rotas estáticas PRIMEIRO ─────────────────────────────────────────────────
@@ -299,27 +322,57 @@ paymentsRouter.get(
 // ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────
 
 // POST /api/payments/:id/cancel
+// SEC FIX #6: requer telegramId no body para verificar ownership
 paymentsRouter.post(
   '/:id/cancel',
   requireBotSecret,
   async (req: Request, res: Response) => {
     const { id } = req.params;
+    const { telegramId } = req.body as { telegramId?: string };
+
+    if (!telegramId) {
+      res.status(400).json({ success: false, error: 'telegramId é obrigatório' });
+      return;
+    }
+
+    const owned = await getPaymentIfOwner(id, telegramId);
+    if (!owned) {
+      logger.warn(`[cancel] telegramId ${telegramId} tentou cancelar pagamento ${id} sem ownership`);
+      res.status(403).json({ success: false, error: 'Não autorizado: este pagamento não pertence à sua conta.' });
+      return;
+    }
+
     const result = await paymentService.cancelPayment(id);
     if (!result.cancelled) {
       res.status(400).json({ success: false, message: result.reason });
       return;
     }
-    logger.info(`Pagamento ${id} cancelado via bot`);
+    logger.info(`Pagamento ${id} cancelado via bot (telegramId: ${telegramId})`);
     res.json({ success: true, message: result.reason });
   }
 );
 
 // GET /api/payments/:id/status
+// SEC FIX #6: requer telegramId na query para verificar ownership
 paymentsRouter.get(
   '/:id/status',
   requireBotSecret,
   async (req: Request, res: Response) => {
     const { id } = req.params;
+    const { telegramId } = req.query as { telegramId?: string };
+
+    if (!telegramId) {
+      res.status(400).json({ success: false, error: 'telegramId é obrigatório' });
+      return;
+    }
+
+    const owned = await getPaymentIfOwner(id, telegramId);
+    if (!owned) {
+      logger.warn(`[status] telegramId ${telegramId} tentou consultar pagamento ${id} sem ownership`);
+      res.status(403).json({ success: false, error: 'Não autorizado: este pagamento não pertence à sua conta.' });
+      return;
+    }
+
     const status = await paymentService.getPaymentStatus(id);
     res.json({ success: true, data: status });
   }
