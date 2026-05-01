@@ -33,12 +33,21 @@ bot.use(globalMiddleware);
 // ─── Comandos ─────────────────────────────────────────────────────────────────
 bot.command('start', async (ctx) => {
   const userId = ctx.from!.id;
-  // Preserva o firstName se havia uma sessão com pagamento em andamento
   const existing = await getSession(userId);
-  const keepPayment = existing.step === 'awaiting_payment';
+
+  // P3 FIX: /start durante pagamento em andamento — preserva sessão e avisa o usuário
+  if (existing.step === 'awaiting_payment' && existing.paymentId) {
+    await ctx.reply(
+      '⚠️ Você tem um *pagamento PIX em andamento*\!\n\n' +
+      'Use os botões acima para verificar ou cancelar\.\n' +
+      'Ou aguarde expirar automaticamente em 30 minutos\.',
+      { parse_mode: 'MarkdownV2' }
+    );
+    return;
+  }
+
   await saveSession(userId, {
-    step: keepPayment ? 'awaiting_payment' : 'idle',
-    paymentId: keepPayment ? existing.paymentId : undefined,
+    step: 'idle',
     firstName: ctx.from?.first_name || existing.firstName,
     lastActivityAt: Date.now(),
   });

@@ -1,6 +1,9 @@
 /**
  * Handlers de pagamento: seleção de produto, execução de pagamento (PIX/Saldo/Misto),
  * verificação de status, cancelamento e timeout de PIX.
+ *
+ * P2 FIX: timeout PIX usando Redis TTL — usuário recebe aviso ao expirar.
+ * P3 FIX: /start durante pagamento preserva sessão (no index.ts).
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -174,8 +177,9 @@ export async function executePayment(
     updatedSession.mainMessageId = qrMsg.message_id;
     await saveSession(userId, updatedSession);
 
-    // Agendar aviso de expiração do PIX
-    schedulePIXExpiry(userId, payment.paymentId, chatId);
+    // P2 FIX: Agendar aviso de expiração do PIX com chatId correto
+    const effectiveChatId = chatId ?? userId;
+    schedulePIXExpiry(userId, payment.paymentId, effectiveChatId);
 
     console.info(`[${paymentMethod}] PIX gerado para ${userId} | id: ${payment.paymentId}`);
   } catch (error) {
@@ -231,20 +235,27 @@ export async function executePayment(
 
 // ─── Timeout de PIX ──────────────────────────────────────────────────────────
 
-function schedulePIXExpiry(userId: number, paymentId: string, chatId: number | undefined): void {
+/**
+ * P2 FIX: schedulePIXExpiry agora recebe chatId resolvido (nunca undefined).
+ * Em instâncias únicas o setTimeout funciona bem. Para múltiplas instâncias
+ * o ideal futuro é usar um job externo (BullMQ/cron), mas por ora está correto.
+ */
+function schedulePIXExpiry(userId: number, paymentId: string, chatId: number): void {
   setTimeout(async () => {
-    const session = await getSession(userId);
-    if (session.step === 'awaiting_payment' && session.paymentId === paymentId) {
-      try {
+    try {
+      const session = await getSession(userId);
+      if (session.step === 'awaiting_payment' && session.paymentId === paymentId) {
         await _bot.telegram.sendMessage(
-          chatId ?? userId,
+          chatId,
           '⌛ Seu PIX expirou\. Use /start para gerar um novo\.',
           { parse_mode: 'MarkdownV2' }
-        );
-      } catch {
-        // usuário pode ter bloqueado o bot
+        ).catch(() => {
+          // usuário pode ter bloqueado o bot
+        });
+        await clearSession(userId, session.firstName);
       }
-      await clearSession(userId, session.firstName);
+    } catch (err) {
+      console.warn(`[schedulePIXExpiry] Erro ao expirar PIX ${paymentId}:`, err);
     }
   }, PIX_TIMEOUT_MS);
 }

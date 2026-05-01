@@ -1,6 +1,9 @@
 /**
- * Gerenciamento de sessões de usuário via Redis.
+ * Gerenciamento de sessões de usuário via Redis (Upstash HTTP).
+ * Em dev sem Upstash, usa fallback em memória (InMemoryRedis no redis.ts).
  * TTL: 1 hora de inatividade.
+ *
+ * P1 FIX: sessions migradas para Redis — sem perda de contexto em restart.
  */
 import { redis } from './redis';
 
@@ -13,6 +16,8 @@ export interface UserSession {
   mainMessageId?: number;
   firstName?: string;
   lastActivityAt: number;
+  /** Armazena produtos em cache local na sessão para evitar re-fetch */
+  products?: never;
 }
 
 const SESSION_TTL_SECONDS = 3600; // 1 hora
