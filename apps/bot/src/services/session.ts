@@ -1,0 +1,45 @@
+/**
+ * Gerenciamento de sessões de usuário via Redis.
+ * TTL: 1 hora de inatividade.
+ */
+import { redis } from './redis';
+
+export interface UserSession {
+  step: 'idle' | 'selecting_product' | 'awaiting_payment' | 'awaiting_deposit_amount';
+  selectedProductId?: string;
+  paymentId?: string;
+  depositPaymentId?: string;
+  depositMessageId?: number;
+  mainMessageId?: number;
+  firstName?: string;
+  lastActivityAt: number;
+}
+
+const SESSION_TTL_SECONDS = 3600; // 1 hora
+
+function sessionKey(userId: number): string {
+  return `session:${userId}`;
+}
+
+export async function getSession(userId: number): Promise<UserSession> {
+  const raw = await redis.get(sessionKey(userId));
+  if (raw) {
+    const session: UserSession = JSON.parse(raw);
+    session.lastActivityAt = Date.now();
+    return session;
+  }
+  return { step: 'idle', lastActivityAt: Date.now() };
+}
+
+export async function saveSession(userId: number, session: UserSession): Promise<void> {
+  session.lastActivityAt = Date.now();
+  await redis.set(sessionKey(userId), JSON.stringify(session), SESSION_TTL_SECONDS);
+}
+
+export async function clearSession(userId: number, keepFirstName?: string): Promise<void> {
+  await saveSession(userId, {
+    step: 'idle',
+    firstName: keepFirstName,
+    lastActivityAt: Date.now(),
+  });
+}
