@@ -1,49 +1,99 @@
-// referral.ts — handler do comando /indicar
-// FIX-BUILD: troca 'grammy' por 'telegraf' e '../lib/logger' por console
-import { Context } from 'telegraf';
+// referral.ts — handler do programa de indicação (comando /indicar + callback show_referral)
+import { Context, Markup } from 'telegraf';
+import { editOrReply } from '../utils/helpers';
 import { registerReferral, getReferralStats } from '../services/referralClient';
 
 const BOT_USERNAME = process.env.BOT_USERNAME ?? '';
 
-/**
- * Handler do comando /indicar
- * Exibe o link de indicação personalizado do usuário e suas estatísticas.
- */
-export async function handleReferral(ctx: Context): Promise<void> {
+// ─── Menu inline de Indicação (callback show_referral) ──────────────────────
+
+export async function showReferralMenu(ctx: Context): Promise<void> {
   const telegramId = String(ctx.from?.id);
   if (!telegramId || telegramId === 'undefined') return;
 
-  // Link de indicação usa deep link do Telegram: t.me/BOT?start=ref_TELEGRAMID
   const refLink = `https://t.me/${BOT_USERNAME}?start=ref_${telegramId}`;
 
-  let statsText = '';
+  let totalIndicados = 0;
+  let totalCompraram = 0;
+  let totalGanho = 0;
+
   try {
     const stats = await getReferralStats(telegramId);
-    if (stats.totalReferred > 0) {
-      statsText =
-        `\n\n📊 *Suas indicações*\n` +
-        `• Amigos indicados: *${stats.totalReferred}*\n` +
-        `• Total ganho: *R$ ${stats.totalEarned.toFixed(2)}*`;
-    }
+    totalIndicados = stats.totalReferred ?? 0;
+    totalCompraram = stats.totalConverted ?? 0;
+    totalGanho = stats.totalEarned ?? 0;
   } catch (err) {
     console.warn('[referral] Erro ao buscar stats:', err);
   }
 
+  const statsBlock =
+    `\n\n📊 <b>Suas estatísticas</b>\n` +
+    `👥 Amigos indicados: <b>${totalIndicados}</b>\n` +
+    `✅ Amigos que compraram: <b>${totalCompraram}</b>\n` +
+    `💰 Total ganho em saldo: <b>R$ ${totalGanho.toFixed(2)}</b>`;
+
+  const text =
+    `🎁 <b>Indique e Ganhe</b>\n\n` +
+    `Compartilhe seu link e ganhe saldo toda vez que um amigo fizer o <b>primeiro pedido</b>!\n\n` +
+    `🔗 <b>Seu link de indicação:</b>\n` +
+    `<code>${refLink}</code>` +
+    statsBlock +
+    `\n\n<i>O crédito cai automaticamente no seu saldo após o pagamento do indicado ser aprovado. 🚀</i>`;
+
+  await editOrReply(ctx, text, {
+    parse_mode: 'HTML',
+    reply_markup: Markup.inlineKeyboard([
+      [Markup.button.url('📤 Compartilhar link', `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent('Use meu link e ganhe desconto!')}`)],
+      [Markup.button.callback('◀️ Voltar ao Menu', 'show_home')],
+    ]).reply_markup,
+  });
+}
+
+// ─── Comando /indicar (mensagem nova, sem edição) ────────────────────────────
+
+export async function handleReferral(ctx: Context): Promise<void> {
+  const telegramId = String(ctx.from?.id);
+  if (!telegramId || telegramId === 'undefined') return;
+
+  const refLink = `https://t.me/${BOT_USERNAME}?start=ref_${telegramId}`;
+
+  let totalIndicados = 0;
+  let totalCompraram = 0;
+  let totalGanho = 0;
+
+  try {
+    const stats = await getReferralStats(telegramId);
+    totalIndicados = stats.totalReferred ?? 0;
+    totalCompraram = stats.totalConverted ?? 0;
+    totalGanho = stats.totalEarned ?? 0;
+  } catch (err) {
+    console.warn('[referral] Erro ao buscar stats:', err);
+  }
+
+  const statsBlock =
+    `\n\n📊 <b>Suas estatísticas</b>\n` +
+    `👥 Amigos indicados: <b>${totalIndicados}</b>\n` +
+    `✅ Amigos que compraram: <b>${totalCompraram}</b>\n` +
+    `💰 Total ganho em saldo: <b>R$ ${totalGanho.toFixed(2)}</b>`;
+
   await ctx.reply(
-    `🎁 *Programa de Indicação*\n\n` +
-    `Indique amigos e ganhe saldo toda vez que eles fizerem o primeiro pedido!\n\n` +
-    `🔗 *Seu link personalizado:*\n` +
-    `\`${refLink}\`` +
-    statsText +
-    `\n\nCompartilhe esse link e o crédito cai automaticamente no seu saldo. 🚀`,
-    { parse_mode: 'Markdown' }
+    `🎁 <b>Indique e Ganhe</b>\n\n` +
+    `Compartilhe seu link e ganhe saldo toda vez que um amigo fizer o <b>primeiro pedido</b>!\n\n` +
+    `🔗 <b>Seu link de indicação:</b>\n` +
+    `<code>${refLink}</code>` +
+    statsBlock +
+    `\n\n<i>O crédito cai automaticamente no seu saldo após o pagamento do indicado ser aprovado. 🚀</i>`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.url('📤 Compartilhar', `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent('Use meu link e ganhe desconto!')}`)],
+      ]).reply_markup,
+    }
   );
 }
 
-/**
- * Processa o deep link de indicação quando um novo usuário abre o bot com ?start=ref_XXX
- * Deve ser chamado no handler de /start antes de exibir o menu principal.
- */
+// ─── Processa deep link ref_XXX no /start ───────────────────────────────────
+
 export async function processReferralStart(
   ctx: Context,
   startPayload: string
@@ -53,7 +103,11 @@ export async function processReferralStart(
   const referrerTelegramId = startPayload.replace('ref_', '');
   const referredTelegramId = String(ctx.from?.id);
 
-  if (!referredTelegramId || referredTelegramId === 'undefined' || referrerTelegramId === referredTelegramId) return;
+  if (
+    !referredTelegramId ||
+    referredTelegramId === 'undefined' ||
+    referrerTelegramId === referredTelegramId
+  ) return;
 
   const result = await registerReferral(referrerTelegramId, referredTelegramId);
   if (result.success) {

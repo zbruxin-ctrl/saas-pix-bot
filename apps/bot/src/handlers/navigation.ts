@@ -29,6 +29,7 @@ export async function showHome(ctx: Context): Promise<void> {
       [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
       [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
       [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
+      [Markup.button.callback('🎁 Indique e Ganhe', 'show_referral')],
       [Markup.button.callback('❓ Ajuda', 'show_help')],
     ]).reply_markup,
   });
@@ -165,6 +166,7 @@ export async function showHelp(ctx: Context): Promise<void> {
     `/produtos — Ver produtos\n` +
     `/saldo — Ver e adicionar saldo\n` +
     `/meus_pedidos — Histórico de pedidos\n` +
+    `/indicar — Programa de indicação\n` +
     `/ajuda — Esta mensagem\n\n` +
     `<b>Como funciona?</b>\n` +
     `1. Escolha um produto\n` +
@@ -216,11 +218,13 @@ export async function showBlockedMessage(ctx: Context): Promise<void> {
         [Markup.button.url('📞 Falar com Suporte', supportUrl)],
         [Markup.button.callback('💰 Ver Saldo', 'show_balance')],
         [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
+        [Markup.button.callback('🎁 Indique e Ganhe', 'show_referral')],
         [Markup.button.callback('❓ Ajuda', 'show_help')],
       ]
     : [
         [Markup.button.callback('💰 Ver Saldo', 'show_balance')],
         [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
+        [Markup.button.callback('🎁 Indique e Ganhe', 'show_referral')],
         [Markup.button.callback('❓ Ajuda', 'show_help')],
       ];
 
