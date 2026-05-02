@@ -305,7 +305,8 @@ bot.on(message('text'), async (ctx) => {
       session.step = 'selecting_product';
       await saveSession(userId, session);
 
-      const d = result.data!;
+      if (!result.valid || !("data" in result) || !result.data) return;
+      const d = result.data;
       await ctx.reply(
         `✅ <b>Cupão aplicado!</b>\n\n` +
         `🏷️ Código: <code>${couponCode}</code>\n` +
