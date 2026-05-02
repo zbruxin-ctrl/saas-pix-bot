@@ -6,6 +6,9 @@
  * FIX-DEPOSIT-SESSION-ORDER: session.depositPaymentId/depositMessageId só são
  *   persistidos APÓS replyWithPhoto ter sucesso, evitando sessão orphan quando
  *   o Telegram rejeita a mensagem com erro 400.
+ * FIX-ESCAPEHTML-NUMERIC: escapeHtml() removido de Number(balance).toFixed(2).
+ * FIX-DEPOSIT-STEP-ORDER: session.step='idle' e saveSession movidos para após
+ *   createDeposit ter sucesso, consistente com FIX-SESSION-ORDER do projeto.
  */
 import { Context, Markup } from 'telegraf';
 import { escapeHtml, escapeMd } from '../utils/escape';
@@ -28,9 +31,10 @@ export async function showBalance(ctx: Context): Promise<void> {
       })
       .join('\n');
 
+    // FIX-ESCAPEHTML-NUMERIC: Number(balance).toFixed(2) é numérico — sem escapeHtml
     const texto =
       `💰 <b>Seu Saldo</b>\n\n` +
-      `Disponível: <b>R$ ${escapeHtml(Number(balance).toFixed(2))}</b>\n\n` +
+      `Disponível: <b>R$ ${Number(balance).toFixed(2)}</b>\n\n` +
       (txLines ? `<b>Últimas transações:</b>\n${txLines}\n\n` : '<i>Nenhuma transação ainda.</i>\n\n') +
       `Use seu saldo para comprar sem precisar fazer PIX toda hora!`;
 
@@ -72,9 +76,6 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
     return;
   }
 
-  session.step = 'idle';
-  await saveSession(userId, session);
-
   const processingMsg = await ctx.reply('⏳ Gerando PIX de depósito, aguarde...', { parse_mode: 'HTML' });
 
   try {
@@ -100,7 +101,7 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
           `💳 *Depósito de Saldo*\n` +
           `Valor: *R$ ${escapeMd(valor.toFixed(2))}*\n` +
           `Válido até: ${escapeMd(expiresStr)}\n` +
-          `🪪 ID: \`${escapeMd(deposit.paymentId)}\`\n\n` +
+          `🪺 ID: \`${escapeMd(deposit.paymentId)}\`\n\n` +
           `📋 *Copia e Cola:*\n\`${escapeMd(deposit.pixQrCodeText)}\`\n\n` +
           `Após o pagamento, o saldo será creditado automaticamente\! ✅`,
         parse_mode: 'MarkdownV2',
@@ -111,7 +112,8 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
       }
     );
 
-    // Foto enviada com sucesso — agora é seguro persistir os IDs
+    // FIX-DEPOSIT-STEP-ORDER: persiste o estado só após foto enviada com sucesso
+    session.step = 'idle';
     session.depositPaymentId = deposit.paymentId;
     session.depositMessageId = depositMsg.message_id;
     session.mainMessageId = depositMsg.message_id;

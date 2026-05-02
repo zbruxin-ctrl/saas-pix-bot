@@ -1,6 +1,11 @@
 /**
  * Handlers de navegação: home, produtos, pedidos, ajuda e mensagem de conta bloqueada.
  * PADRÃO: parse_mode HTML em todas as mensagens.
+ *
+ * FIX-SHOWHELP-EDITORRELY: showHelp migrado para editOrReply() eliminando
+ *   duplicação de editMessageText + sendMessage + atualização manual de mainMessageId.
+ * FIX-ESCAPEHTML-NUMERIC: escapeHtml() removido de valores numéricos/datas
+ *   gerados por toLocaleDateString/toFixed em showOrders.
  */
 import { Context, Markup } from 'telegraf';
 import { escapeHtml } from '../utils/escape';
@@ -10,7 +15,7 @@ import { apiClient } from '../services/apiClient';
 import { env } from '../config/env';
 import type { OrderSummary } from '../services/apiClient';
 
-// ─── Home ───────────────────────────────────────────────────────────────────
+// ─── Home ──────────────────────────────────────────────────────────────────────────────────────────
 
 export async function showHome(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
@@ -35,7 +40,7 @@ export async function showHome(ctx: Context): Promise<void> {
   });
 }
 
-// ─── Produtos ────────────────────────────────────────────────────────────────
+// ─── Produtos ────────────────────────────────────────────────────────────────────────────────────
 
 export async function showProducts(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
@@ -82,7 +87,7 @@ export async function showProducts(ctx: Context): Promise<void> {
   }
 }
 
-// ─── Pedidos ─────────────────────────────────────────────────────────────────
+// ─── Pedidos ─────────────────────────────────────────────────────────────────────────────────────
 
 export async function showOrders(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
@@ -112,6 +117,8 @@ export async function showOrders(ctx: Context): Promise<void> {
       CANCELLED: '🚫',
     };
 
+    // FIX-ESCAPEHTML-NUMERIC: date e valor são gerados por toLocaleDateString/toFixed
+    // — nunca contêm caracteres especiais HTML, escapeHtml() desnecessário.
     const lines = orders.slice(0, 10).map((o: OrderSummary) => {
       const emoji = statusEmoji[o.status] ?? '📦';
       const date = new Date(o.createdAt).toLocaleDateString('pt-BR', {
@@ -126,7 +133,7 @@ export async function showOrders(ctx: Context): Promise<void> {
         : o.paymentMethod === 'MIXED' ? ' · 🔀 Misto'
         : o.paymentMethod === 'PIX' ? ' · 📱 PIX'
         : '';
-      return `${emoji} <b>${escapeHtml(o.productName)}</b> — ${escapeHtml(date)}${escapeHtml(valor)}${metodo}`;
+      return `${emoji} <b>${escapeHtml(o.productName)}</b> — ${date}${valor}${metodo}`;
     });
 
     await editOrReply(
@@ -149,12 +156,9 @@ export async function showOrders(ctx: Context): Promise<void> {
   }
 }
 
-// ─── Ajuda ───────────────────────────────────────────────────────────────────
+// ─── Ajuda ───────────────────────────────────────────────────────────────────────────────────────
 
 export async function showHelp(ctx: Context): Promise<void> {
-  const userId = ctx.from!.id;
-  const chatId = ctx.chat?.id;
-  const session = await getSession(userId);
   const supportUrl = env.SUPPORT_PHONE
     ? `https://wa.me/${encodeURIComponent(env.SUPPORT_PHONE)}`
     : '#';
@@ -184,29 +188,15 @@ export async function showHelp(ctx: Context): Promise<void> {
       ]
     : [[Markup.button.callback('◀️ Voltar', 'show_home')]];
 
-  const keyboard = Markup.inlineKeyboard(buttons);
-
-  if (session.mainMessageId && chatId) {
-    try {
-      await ctx.telegram.editMessageText(chatId, session.mainMessageId, undefined, text, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard.reply_markup,
-      });
-      return;
-    } catch {
-      // fallthrough — mensagem muito antiga ou deletada
-    }
-  }
-
-  const sent = await ctx.telegram.sendMessage(chatId ?? userId, text, {
+  // FIX-SHOWHELP-EDITORRELY: usa editOrReply em vez de reimplementar
+  // editMessageText + sendMessage + atualização manual de mainMessageId.
+  await editOrReply(ctx, text, {
     parse_mode: 'HTML',
-    reply_markup: keyboard.reply_markup,
+    reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
   });
-  session.mainMessageId = sent.message_id;
-  await saveSession(userId, session);
 }
 
-// ─── Conta bloqueada ─────────────────────────────────────────────────────────
+// ─── Conta bloqueada ───────────────────────────────────────────────────────────────────────────────
 
 export async function showBlockedMessage(ctx: Context): Promise<void> {
   const supportUrl = env.SUPPORT_PHONE
