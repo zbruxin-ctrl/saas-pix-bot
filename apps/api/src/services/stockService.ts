@@ -2,6 +2,7 @@
 // FIX #1: reserveStock no path legado (stock numérico) agora usa $transaction atômica
 //         para evitar race condition entre getAvailableStock e create
 // FIX #17: releaseExpiredReservations usa pixExpiresAt corretamente
+// FIX-BUILD3: reason tornado opcional em releaseReservation (TS2554)
 import { StockItemStatus, StockReservationStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -176,7 +177,8 @@ export class StockService {
     });
   }
 
-  async releaseReservation(paymentId: string, reason: string): Promise<void> {
+  async releaseReservation(paymentId: string, reason?: string): Promise<void> {
+    const resolvedReason = reason ?? 'não especificado';
     const item = await prisma.stockItem.findUnique({ where: { paymentId } });
     if (item) {
       if (item.status !== StockItemStatus.RESERVED) return;
@@ -190,7 +192,7 @@ export class StockService {
         },
       });
       logger.info(
-        `[StockService] StockItem liberado | item=${item.id} | produto=${item.productId} | pagamento=${paymentId} | motivo=${reason}`
+        `[StockService] StockItem liberado | item=${item.id} | produto=${item.productId} | pagamento=${paymentId} | motivo=${resolvedReason}`
       );
       return;
     }
@@ -202,7 +204,7 @@ export class StockService {
       data: { status: StockReservationStatus.RELEASED, releasedAt: new Date() },
     });
     logger.info(
-      `[StockService] Reserva legada liberada | id=${reservation.id} | produto=${reservation.productId} | pagamento=${paymentId} | motivo=${reason}`
+      `[StockService] Reserva legada liberada | id=${reservation.id} | produto=${reservation.productId} | pagamento=${paymentId} | motivo=${resolvedReason}`
     );
   }
 
