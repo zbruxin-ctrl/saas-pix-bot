@@ -16,6 +16,9 @@ import { paymentsRouter } from './routes/payments';
 import { webhooksRouter } from './routes/webhooks';
 import adminRouter from './routes/admin';
 import { telegramRouter } from './routes/telegram';
+import { pricingRouter } from './routes/pricing';
+import { couponsRouter } from './routes/coupons';
+import { referralsRouter } from './routes/referrals';
 import { startExpireJob, stopExpireJob } from './jobs/expirePayments';
 
 // build: 2026-04-29
@@ -111,6 +114,9 @@ app.use('/api/auth', authRouter);
 app.use('/api/payments', paymentsRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/pricing', pricingRouter);
+app.use('/api/coupons', couponsRouter);
+app.use('/api/referrals', referralsRouter);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
