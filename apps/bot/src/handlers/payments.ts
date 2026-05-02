@@ -5,53 +5,26 @@
  * PADRÃO: parse_mode HTML em mensagens de texto.
  *         parse_mode MarkdownV2 APENAS em captions de replyWithPhoto.
  *
- * P2 FIX: timeout PIX usando Redis TTL — usuário recebe aviso ao expirar.
- * P3 FIX: /start durante pagamento preserva sessão (no index.ts).
- * SEC FIX #2: cancelPayment valida ownership do paymentId antes de cancelar.
- * SEC FIX #6: getPaymentStatus e cancelPayment passam telegramId para a API.
- * FIX #1: schedulePIXExpiry usa Redis TTL como fonte de verdade para detectar
- *         expiração resistente a restarts.
- *         pixExpiresAt é salvo na sessão para re-agendamento no /start.
- * BUG FIX: answerCbQuery chamado ANTES de qualquer operação async.
- * FEAT-PRICING: tela de cupom/referral antes de gerar PIX.
- * FIX-TS2352: double cast removido (AUDIT #13).
- * FIX-COUPON-DISCOUNT: aplica pendingCouponDiscount ao preço exibido na tela de método.
- * FIX-MDV2: escapa '!' e demais caracteres reservados do MarkdownV2.
- * FEAT-REMOVE-COUPON: botão Remover cupom na tela de método de pagamento.
- * FEAT-COPYPASTE-CHECK: salva pixQrCodeText na sessão.
- * FIX-502: mensagem amigável quando API retorna 502.
- * FIX-SESSION-ORDER, FIX-CHECK-SESSION-ORDER, FIX-ESCAPEHTML-NUMERIC,
- * FIX-DOUBLE-GETSESSION, FIX-ESCAPEHTML-DISCOUNT, AUDIT #4, #7, #19.
- * FIX-CUPOM: cupão→cupom.
- * FEAT-MULTI-QTY: showQuantityScreen para compra múltipla;
- *                 stockLine no card; quantity no createPayment.
+ * FIX-BUILD: remove imports inexistentes (../lib/logger, sentry, lock).
+ *            usa ../services/locks para acquireLock/releaseLock.
+ *            usa console.error/warn em vez de logger/captureError.
+ *            corrige pixQrCodeText (não pixCopyPaste).
+ *            corrige payment.paymentId (não payment.id).
+ * FEAT-MULTI-QTY: showQuantityScreen exportada;
+ *                 stockLine no card de pagamento;
+ *                 quantity no createPayment.
  */
 import { Context, Markup } from 'telegraf';
 import { apiClient } from '../services/apiClient';
-import { getSession, saveSession, clearSession, UserSession } from '../services/session';
-import { logger } from '../lib/logger';
-import { captureError } from '../lib/sentry';
-import { releaseLock, acquireLock } from '../lib/lock';
+import { getSession, saveSession, clearSession } from '../services/session';
+import { acquireLock, releaseLock } from '../services/locks';
 
 type ProductDTO = Awaited<ReturnType<typeof apiClient.getProducts>>[number];
 
-const pixTimers = new Map<number, NodeJS.Timeout>();
-
-function registerPIXTimer(userId: number, t: NodeJS.Timeout) {
-  cancelPIXTimer(userId);
-  pixTimers.set(userId, t);
-}
-
-export function cancelPIXTimer(userId: number) {
-  const existing = pixTimers.get(userId);
-  if (existing) {
-    clearTimeout(existing);
-    pixTimers.delete(userId);
-  }
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(text: string): string {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -59,7 +32,7 @@ function escapeHtml(text: string): string {
 }
 
 function escapeMarkdownV2(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
 async function editOrReply(
@@ -82,7 +55,25 @@ export function initPaymentHandlers() {
   // placeholder — handlers registrados no index.ts
 }
 
-// ─── Tela de seleção de quantidade ────────────────────────────────────────────
+// ─── PIX timers ──────────────────────────────────────────────────────────────
+
+const pixTimers = new Map<number, NodeJS.Timeout>();
+
+function registerPIXTimer(userId: number, t: NodeJS.Timeout) {
+  cancelPIXTimer(userId);
+  pixTimers.set(userId, t);
+}
+
+export function cancelPIXTimer(userId: number) {
+  const existing = pixTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+    pixTimers.delete(userId);
+  }
+}
+
+// ─── Tela de quantidade ──────────────────────────────────────────────────────
+
 export async function showQuantityScreen(
   ctx: Context,
   product: ProductDTO
@@ -98,7 +89,8 @@ export async function showQuantityScreen(
   const maxQty = Math.min(maxStock, 10);
 
   if (maxQty <= 0) {
-    await editOrReply(ctx,
+    await editOrReply(
+      ctx,
       `⛔ <b>${escapeHtml(product.name)}</b>\n\nEste produto está esgotado no momento.`,
       {
         parse_mode: 'HTML',
@@ -139,16 +131,14 @@ export async function showQuantityScreen(
   );
 }
 
-// ─── Tela de método de pagamento ─────────────────────────────────────────────────
+// ─── Tela de método de pagamento ─────────────────────────────────────────────
+
 export async function showPaymentMethodScreen(
   ctx: Context,
   product: ProductDTO,
   balance: number
 ): Promise<void> {
   const userId = ctx.from!.id;
-
-  // FIX-COUPON-DISCOUNT: aplica desconto do cupom ao preço exibido
-  // FEAT-MULTI-QTY: considera quantidade selecionada no preço total
   const session = await getSession(userId);
   const rawPrice = Number(product.price);
   const couponDiscount = session.pendingCouponDiscount ?? 0;
@@ -156,10 +146,8 @@ export async function showPaymentMethodScreen(
   const unitPrice = Math.max(0, rawPrice - couponDiscount);
   const price = unitPrice * qty;
 
-  const balanceStr = balance.toFixed(2);
   const descLine = product.description
-    ? `\n📝 <i>${escapeHtml(product.description)}</i>\n`
-    : '';
+    ? `\n📝 <i>${escapeHtml(product.description)}</i>\n` : '';
 
   const stockLine = (() => {
     if (product.stock == null) return '';
@@ -185,12 +173,11 @@ export async function showPaymentMethodScreen(
     `💰 <b>Valor unitário:</b> R$ ${rawPrice.toFixed(2)}\n` +
     couponLine +
     qtyLine +
-    `🏦 <b>Seu saldo:</b> R$ ${balanceStr}\n\n` +
+    `🏦 <b>Seu saldo:</b> R$ ${balance.toFixed(2)}\n\n` +
     `<b>Como deseja pagar?</b>`;
 
   const canPayWithBalance = balance >= price;
   const canPayMixed = balance > 0 && balance < price;
-
   const hasCoupon = !!session.pendingCoupon;
 
   const keyboard = Markup.inlineKeyboard([
@@ -208,7 +195,8 @@ export async function showPaymentMethodScreen(
   });
 }
 
-// ─── Tela de input de cupom ────────────────────────────────────────────────────
+// ─── Tela de input de cupom ──────────────────────────────────────────────────
+
 export async function showCouponInputScreen(
   ctx: Context,
   productId: string
@@ -231,13 +219,12 @@ export async function showCouponInputScreen(
   );
 }
 
-// ─── Executar pagamento ─────────────────────────────────────────────────────────
+// ─── Executar pagamento ───────────────────────────────────────────────────────
+
 export async function executePayment(
   ctx: Context,
   productId: string,
-  paymentMethod: 'PIX' | 'BALANCE' | 'MIXED',
-  couponCode?: string,
-  referralCode?: string
+  paymentMethod: 'PIX' | 'BALANCE' | 'MIXED'
 ): Promise<void> {
   const userId = ctx.from!.id;
   const lockKey = `payment_lock:${userId}`;
@@ -250,8 +237,8 @@ export async function executePayment(
   const session = await getSession(userId);
 
   try {
-    const effectiveCoupon = couponCode ?? session.pendingCoupon ?? undefined;
     const qty = session.pendingQty ?? 1;
+    const effectiveCoupon = session.pendingCoupon ?? undefined;
 
     const payment = await apiClient.createPayment({
       telegramId: String(userId),
@@ -261,31 +248,24 @@ export async function executePayment(
       username: ctx.from?.username,
       paymentMethod,
       ...(effectiveCoupon ? { couponCode: effectiveCoupon } : {}),
-      ...(referralCode ? { referralCode } : {}),
     } as Parameters<typeof apiClient.createPayment>[0]);
 
     if (paymentMethod === 'PIX' || paymentMethod === 'MIXED') {
-      const qrText = payment.pixQrCode ?? payment.pixCopyPaste ?? '';
+      const qrText = payment.pixQrCodeText ?? payment.pixQrCode ?? '';
       const amount = payment.amount ?? 0;
       const expiresAt = payment.expiresAt
         ? new Date(payment.expiresAt).toISOString()
         : new Date(Date.now() + 30 * 60 * 1000).toISOString();
 
-      const caption = escapeMarkdownV2(
-        `💳 *PIX gerado com sucesso\!*\n\n` +
-        `📦 *Produto:* ${product?.name ?? ''}\n` +
-        `💰 *Valor:* R$ ${Number(amount).toFixed(2)}\n\n` +
-        `Copie o código abaixo ou escaneie o QR code:`
-      ).slice(0, 900);
+      let productName = payment.productName ?? '';
+      if (!productName) {
+        try {
+          const products = await apiClient.getProducts();
+          productName = products.find((p) => p.id === productId)?.name ?? '';
+        } catch { /**/ }
+      }
 
-      let productName = '';
-      try {
-        const products = await apiClient.getProducts();
-        const prod = products.find((p) => p.id === productId);
-        productName = prod?.name ?? '';
-      } catch { /**/ }
-
-      const captionFinal = [
+      const captionLines = [
         `💳 *PIX gerado com sucesso\!*`,
         ``,
         `📦 *Produto:* ${escapeMarkdownV2(productName)}`,
@@ -298,65 +278,50 @@ export async function executePayment(
       const pixMsg = await ctx.replyWithPhoto(
         { url: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}` },
         {
-          caption: captionFinal,
+          caption: captionLines,
           parse_mode: 'MarkdownV2',
           reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Verificar Pagamento', `check_payment_${payment.id}`)],
-            [Markup.button.callback('❌ Cancelar PIX', `cancel_payment_${payment.id}`)],
+            [Markup.button.callback('🔄 Verificar Pagamento', `check_payment_${payment.paymentId}`)],
+            [Markup.button.callback('❌ Cancelar PIX', `cancel_payment_${payment.paymentId}`)],
           ]).reply_markup,
         }
       );
 
-      await ctx.reply(
-        `<code>${escapeHtml(qrText)}</code>`,
-        { parse_mode: 'HTML' }
-      );
+      await ctx.reply(`<code>${escapeHtml(qrText)}</code>`, { parse_mode: 'HTML' });
 
       session.step = 'awaiting_payment';
-      session.paymentId = payment.id;
+      session.paymentId = payment.paymentId;
       session.pixExpiresAt = expiresAt;
       session.pixQrCodeText = qrText;
       session.mainMessageId = pixMsg.message_id;
       await saveSession(userId, session);
 
-      await schedulePIXExpiry(ctx, payment.id, userId, expiresAt);
+      await schedulePIXExpiry(ctx, payment.paymentId, userId, expiresAt);
     } else {
       // BALANCE
       session.step = 'idle';
       await saveSession(userId, session);
-
       await ctx.reply(
-        `✅ <b>Pagamento realizado com sucesso\!</b>\n\n` +
-        `📦 Seu pedido foi confirmado\.`,
+        `✅ <b>Pagamento realizado com sucesso!</b>\n\n📦 Seu pedido foi confirmado.`,
         { parse_mode: 'HTML' }
       );
     }
   } catch (err: unknown) {
-    captureError(err, { handler: 'executePayment', productId, paymentMethod, userId });
+    console.error('[executePayment] erro:', err);
     const msg = err instanceof Error ? err.message : '';
     const is502 = msg.includes('502') || msg.includes('Bad Gateway');
     if (is502) {
-      await ctx.reply(
-        '⚠️ O servidor está inicializando. Tente novamente em alguns segundos.',
-        { parse_mode: 'HTML' }
-      );
-    } else if (paymentMethod === 'MIXED') {
-      await ctx.reply(
-        `❌ Erro ao processar pagamento misto: ${escapeHtml(msg || 'Erro desconhecido')}`,
-        { parse_mode: 'HTML' }
-      );
+      await ctx.reply('⚠️ O servidor está inicializando. Tente novamente em alguns segundos.', { parse_mode: 'HTML' });
     } else {
-      await ctx.reply(
-        `❌ Erro ao processar pagamento: ${escapeHtml(msg || 'Erro desconhecido')}`,
-        { parse_mode: 'HTML' }
-      );
+      await ctx.reply(`❌ Erro ao processar pagamento: ${escapeHtml(msg || 'Erro desconhecido')}`, { parse_mode: 'HTML' });
     }
   } finally {
     await releaseLock(lockKey, lockToken);
   }
 }
 
-// ─── Verificar pagamento ───────────────────────────────────────────────────────
+// ─── Verificar pagamento ──────────────────────────────────────────────────────
+
 export async function handleCheckPayment(
   ctx: Context,
   paymentId: string
@@ -367,9 +332,9 @@ export async function handleCheckPayment(
   try {
     const status = await apiClient.getPaymentStatus(paymentId, String(userId));
 
-    if (status.status === 'PAID') {
+    if (status.status === 'PAID' || status.status === 'APPROVED') {
       await editOrReply(ctx,
-        `✅ <b>Pagamento confirmado\!</b>\n\nSeu pedido foi processado com sucesso\.`,
+        `✅ <b>Pagamento confirmado!</b>\n\nSeu pedido foi processado com sucesso.`,
         { parse_mode: 'HTML' }
       );
       await clearSession(userId, session.firstName);
@@ -380,7 +345,6 @@ export async function handleCheckPayment(
       );
       await clearSession(userId, session.firstName);
     } else {
-      // PENDING — reenvia copia e cola
       if (session.pixQrCodeText) {
         await ctx.reply(
           `⏳ Pagamento ainda não confirmado. Copie o código PIX abaixo:\n\n<code>${escapeHtml(session.pixQrCodeText)}</code>`,
@@ -391,12 +355,13 @@ export async function handleCheckPayment(
       }
     }
   } catch (err) {
-    captureError(err, { handler: 'handleCheckPayment', paymentId, userId });
+    console.error('[handleCheckPayment] erro:', err);
     await ctx.reply('❌ Erro ao verificar pagamento. Tente novamente.', { parse_mode: 'HTML' });
   }
 }
 
-// ─── Cancelar pagamento ────────────────────────────────────────────────────────
+// ─── Cancelar pagamento ───────────────────────────────────────────────────────
+
 export async function handleCancelPayment(
   ctx: Context,
   paymentId: string
@@ -422,6 +387,7 @@ export async function handleCancelPayment(
 }
 
 // ─── Agendar expiração do PIX ─────────────────────────────────────────────────
+
 export async function schedulePIXExpiry(
   ctx: Context,
   paymentId: string,
@@ -433,14 +399,10 @@ export async function schedulePIXExpiry(
   const msUntilExpiry = expiresAt - now;
 
   if (msUntilExpiry <= 0) {
-    // Já expirou — verificar status imediatamente
     try {
       const status = await apiClient.getPaymentStatus(paymentId, String(userId));
-      if (status.status !== 'PAID') {
-        await ctx.reply(
-          '⏰ Seu PIX expirou. Gere um novo pedido quando quiser.',
-          { parse_mode: 'HTML' }
-        );
+      if (status.status !== 'PAID' && status.status !== 'APPROVED') {
+        await ctx.reply('⏰ Seu PIX expirou. Gere um novo pedido quando quiser.', { parse_mode: 'HTML' });
         await clearSession(userId);
       }
     } catch { /**/ }
@@ -450,11 +412,8 @@ export async function schedulePIXExpiry(
   const t = setTimeout(async () => {
     try {
       const status = await apiClient.getPaymentStatus(paymentId, String(userId));
-      if (status.status !== 'PAID') {
-        await ctx.reply(
-          '⏰ Seu PIX expirou. Gere um novo pedido quando quiser.',
-          { parse_mode: 'HTML' }
-        );
+      if (status.status !== 'PAID' && status.status !== 'APPROVED') {
+        await ctx.reply('⏰ Seu PIX expirou. Gere um novo pedido quando quiser.', { parse_mode: 'HTML' });
         await clearSession(userId);
       }
     } catch { /**/ } finally {

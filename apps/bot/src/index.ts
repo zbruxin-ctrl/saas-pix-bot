@@ -1,17 +1,22 @@
 /**
  * Bot Telegram principal — registro de handlers e inicialização.
  *
- * P3 FIX: /start durante pagamento preserva sessão PIX em andamento.
- * FEAT-DEPOSIT: comando /depositar e handlers de recarga de saldo.
- * FEAT-PRICING: handlers de cupom e referral.
- * FIX-COUPON-DISCOUNT: remove_coupon limpa pendingCoupon e pendingCouponDiscount.
+ * FIX-BUILD: remove imports inexistentes (./lib/logger, ./lib/sentry).
+ *            usa console.log/error em vez de logger/captureError.
+ *            importa registerReferral de referralClient (não apiClient).
+ *            importa validateCoupon de couponClient (não apiClient).
+ *            remove getSetting (não existe no apiClient).
+ *            corrige createDeposit: assinatura (telegramId, amount, firstName, username).
+ *            corrige deposit.paymentId (não deposit.id).
+ *            corrige deposit.pixQrCodeText (não deposit.pixCopyPaste).
+ *            corrige tipo dos handlers de comando: usa NarrowedContext via (ctx: any).
  * FEAT-MULTI-QTY: select_product → showQuantityScreen; nova action set_qty_:id_:n.
  */
-import { Telegraf, Markup } from 'telegraf';
+import { Telegraf, Markup, Context } from 'telegraf';
 import { apiClient } from './services/apiClient';
 import { getSession, saveSession, clearSession } from './services/session';
-import { logger } from './lib/logger';
-import { captureError } from './lib/sentry';
+import { validateCoupon } from './services/couponClient';
+import { registerReferral } from './services/referralClient';
 import {
   initPaymentHandlers,
   executePayment,
@@ -33,7 +38,8 @@ const bot = new Telegraf(BOT_TOKEN);
 
 initPaymentHandlers();
 
-// ─── /start ───────────────────────────────────────────────────────────────
+// ─── /start ───────────────────────────────────────────────────────────────────
+
 bot.start(async (ctx) => {
   try {
     const userId = ctx.from.id;
@@ -42,11 +48,12 @@ bot.start(async (ctx) => {
 
     if (referralCode && referralCode !== String(userId)) {
       try {
-        await apiClient.registerReferral(String(userId), referralCode);
+        // registerReferral(referrerTelegramId, referredTelegramId)
+        await registerReferral(referralCode, String(userId));
       } catch { /**/ }
     }
 
-    // P3 FIX: se há PIX pendente, re-agenda expiry e avisa
+    // re-agenda expiry se há PIX pendente
     if (session.step === 'awaiting_payment' && session.paymentId && session.pixExpiresAt) {
       await ctx.reply(
         `⏳ Você tem um PIX pendente. Use o botão abaixo para verificar.`,
@@ -58,16 +65,16 @@ bot.start(async (ctx) => {
           ]).reply_markup,
         }
       );
-      await schedulePIXExpiry(ctx, session.paymentId, userId, session.pixExpiresAt);
+      await schedulePIXExpiry(ctx as unknown as Context, session.paymentId, userId, session.pixExpiresAt);
       return;
     }
 
     session.firstName = ctx.from.first_name;
     await saveSession(userId, session);
 
-    const welcomeMsg = await apiClient.getSetting?.('welcome_message').catch(() => null)
-      ?? process.env.BOT_WELCOME_MESSAGE
-      ?? `Olá, <b>${ctx.from.first_name}</b>! Bem-vindo(a). Use /produtos para ver o catálogo.`;
+    const welcomeMsg =
+      process.env.BOT_WELCOME_MESSAGE ??
+      `Olá, <b>${ctx.from.first_name}</b>! Bem-vindo(a). Use /produtos para ver o catálogo.`;
 
     await ctx.reply(
       welcomeMsg.replace('{nome}', ctx.from.first_name),
@@ -80,13 +87,13 @@ bot.start(async (ctx) => {
       }
     );
   } catch (err) {
-    captureError(err, { handler: 'start' });
-    logger.error('[/start] Erro:', err);
+    console.error('[/start] Erro:', err);
   }
 });
 
-// ─── /produtos ──────────────────────────────────────────────────────────
-async function showProducts(ctx: Parameters<typeof bot.command>[1]) {
+// ─── /produtos ────────────────────────────────────────────────────────────────
+
+async function showProducts(ctx: any) {
   try {
     const products = await apiClient.getProducts();
     if (!products.length) {
@@ -94,7 +101,7 @@ async function showProducts(ctx: Parameters<typeof bot.command>[1]) {
       return;
     }
 
-    const buttons = products.map((p) => [
+    const buttons = products.map((p: ProductDTO) => [
       Markup.button.callback(
         `${p.name} — R$ ${Number(p.price).toFixed(2)}${
           p.stock != null ? ` (${p.stock} em estoque)` : ''
@@ -108,7 +115,7 @@ async function showProducts(ctx: Parameters<typeof bot.command>[1]) {
       reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
     });
   } catch (err) {
-    captureError(err, { handler: 'showProducts' });
+    console.error('[showProducts] erro:', err);
     await ctx.reply('❌ Erro ao buscar produtos. Tente novamente.', { parse_mode: 'HTML' });
   }
 }
@@ -118,11 +125,12 @@ bot.hears('🛋️ Produtos', showProducts);
 
 bot.action('show_products', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await showProducts(ctx as never);
+  await showProducts(ctx);
 });
 
-// ─── /saldo ──────────────────────────────────────────────────────────────
-async function showBalance(ctx: Parameters<typeof bot.command>[1]) {
+// ─── /saldo ───────────────────────────────────────────────────────────────────
+
+async function showBalance(ctx: any) {
   try {
     const userId = ctx.from!.id;
     const data = await apiClient.getBalance(String(userId));
@@ -131,7 +139,7 @@ async function showBalance(ctx: Parameters<typeof bot.command>[1]) {
       { parse_mode: 'HTML' }
     );
   } catch (err) {
-    captureError(err, { handler: 'showBalance' });
+    console.error('[showBalance] erro:', err);
     await ctx.reply('❌ Erro ao buscar saldo.', { parse_mode: 'HTML' });
   }
 }
@@ -139,24 +147,26 @@ async function showBalance(ctx: Parameters<typeof bot.command>[1]) {
 bot.command('saldo', showBalance);
 bot.hears('💰 Meu Saldo', showBalance);
 
-// ─── Suporte ──────────────────────────────────────────────────────────────
-async function showSupport(ctx: Parameters<typeof bot.command>[1]) {
+// ─── Suporte ──────────────────────────────────────────────────────────────────
+
+async function showSupport(ctx: any) {
   try {
     const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
     const msg = phone
       ? `💬 <b>Suporte:</b>\n\n<a href="https://wa.me/${phone}">Falar com suporte via WhatsApp</a>`
       : `💬 Entre em contato com o suporte pelo administrador do bot.`;
-    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true } as never);
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
   } catch (err) {
-    captureError(err, { handler: 'showSupport' });
+    console.error('[showSupport] erro:', err);
   }
 }
 
 bot.command('suporte', showSupport);
 bot.hears('💬 Suporte', showSupport);
 
-// ─── Depositar ────────────────────────────────────────────────────────────
-async function showDeposit(ctx: Parameters<typeof bot.command>[1]) {
+// ─── Depositar ────────────────────────────────────────────────────────────────
+
+async function showDeposit(ctx: any) {
   try {
     const userId = ctx.from!.id;
     const session = await getSession(userId);
@@ -167,14 +177,15 @@ async function showDeposit(ctx: Parameters<typeof bot.command>[1]) {
       { parse_mode: 'HTML' }
     );
   } catch (err) {
-    captureError(err, { handler: 'showDeposit' });
+    console.error('[showDeposit] erro:', err);
   }
 }
 
 bot.command('depositar', showDeposit);
 bot.hears('💳 Depositar', showDeposit);
 
-// ─── Seleção de produto → tela de quantidade ──────────────────────────────────────
+// ─── Seleção de produto → tela de quantidade ──────────────────────────────────
+
 bot.action(/^select_product_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produto...').catch(() => {});
   try {
@@ -183,14 +194,13 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
     const session = await getSession(userId);
 
     let product: ProductDTO | undefined;
-
     try {
       const products = await apiClient.getProducts();
       product = products.find((p) => p.id === productId);
       session.products = products as never;
       await saveSession(userId, session);
     } catch (err) {
-      captureError(err, { handler: 'select_product', productId, userId });
+      console.error('[select_product] erro ao buscar produtos:', err);
       await ctx.reply('❌ Erro ao buscar produto. Tente novamente.', { parse_mode: 'HTML' });
       return;
     }
@@ -205,15 +215,14 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
       return;
     }
 
-    // FEAT-MULTI-QTY: vai para tela de quantidade antes do pagamento
-    await showQuantityScreen(ctx, product);
+    await showQuantityScreen(ctx as unknown as Context, product);
   } catch (err) {
-    captureError(err, { handler: 'select_product_action' });
-    logger.error('[select_product] Erro inesperado:', err);
+    console.error('[select_product_action] erro:', err);
   }
 });
 
-// ─── Seleção de quantidade → tela de pagamento ──────────────────────────────────
+// ─── Seleção de quantidade → tela de pagamento ────────────────────────────────
+
 bot.action(/^set_qty_(.+)_(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   try {
@@ -237,38 +246,39 @@ bot.action(/^set_qty_(.+)_(\d+)$/, async (ctx) => {
       return;
     }
 
-    await showPaymentMethodScreen(ctx, product, Number(walletData.balance));
+    await showPaymentMethodScreen(ctx as unknown as Context, product, Number(walletData.balance));
   } catch (err) {
-    captureError(err, { handler: 'set_qty' });
-    logger.error('[set_qty] Erro:', err);
+    console.error('[set_qty] erro:', err);
   }
 });
 
-// ─── Métodos de pagamento ───────────────────────────────────────────────────────
+// ─── Métodos de pagamento ─────────────────────────────────────────────────────
+
 bot.action(/^pay_pix_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await executePayment(ctx, ctx.match[1], 'PIX');
+  await executePayment(ctx as unknown as Context, ctx.match[1], 'PIX');
 });
 
 bot.action(/^pay_balance_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await executePayment(ctx, ctx.match[1], 'BALANCE');
+  await executePayment(ctx as unknown as Context, ctx.match[1], 'BALANCE');
 });
 
 bot.action(/^pay_mixed_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await executePayment(ctx, ctx.match[1], 'MIXED');
+  await executePayment(ctx as unknown as Context, ctx.match[1], 'MIXED');
 });
 
-// ─── Verificar / cancelar pagamento ────────────────────────────────────────────
+// ─── Verificar / cancelar pagamento ──────────────────────────────────────────
+
 bot.action(/^check_payment_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await handleCheckPayment(ctx, ctx.match[1]);
+  await handleCheckPayment(ctx as unknown as Context, ctx.match[1]);
 });
 
 bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await handleCancelPayment(ctx, ctx.match[1]);
+  await handleCancelPayment(ctx as unknown as Context, ctx.match[1]);
 });
 
 bot.action('cancel_payment', async (ctx) => {
@@ -280,10 +290,11 @@ bot.action('cancel_payment', async (ctx) => {
   await ctx.reply('❌ Pedido cancelado. Use /produtos para começar novamente.', { parse_mode: 'HTML' });
 });
 
-// ─── Cupom ───────────────────────────────────────────────────────────────
+// ─── Cupom ────────────────────────────────────────────────────────────────────
+
 bot.action(/^coupon_input_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await showCouponInputScreen(ctx, ctx.match[1]);
+  await showCouponInputScreen(ctx as unknown as Context, ctx.match[1]);
 });
 
 bot.action(/^back_to_payment_(.+)$/, async (ctx) => {
@@ -297,9 +308,9 @@ bot.action(/^back_to_payment_(.+)$/, async (ctx) => {
     ]);
     const product = products.find((p) => p.id === productId);
     if (!product) { await ctx.reply('❌ Produto não encontrado.'); return; }
-    await showPaymentMethodScreen(ctx, product, Number(walletData.balance));
+    await showPaymentMethodScreen(ctx as unknown as Context, product, Number(walletData.balance));
   } catch (err) {
-    captureError(err, { handler: 'back_to_payment' });
+    console.error('[back_to_payment] erro:', err);
   }
 });
 
@@ -318,51 +329,60 @@ bot.action(/^remove_coupon_(.+)$/, async (ctx) => {
     ]);
     const product = products.find((p) => p.id === productId);
     if (!product) { await ctx.reply('❌ Produto não encontrado.'); return; }
-    await showPaymentMethodScreen(ctx, product, Number(walletData.balance));
+    await showPaymentMethodScreen(ctx as unknown as Context, product, Number(walletData.balance));
   } catch (err) {
-    captureError(err, { handler: 'remove_coupon' });
+    console.error('[remove_coupon] erro:', err);
   }
 });
 
-// ─── Mensagens de texto (cupom / depósito) ──────────────────────────────────
+// ─── Mensagens de texto (cupom / depósito) ────────────────────────────────────
+
 bot.on('text', async (ctx) => {
   try {
     const userId = ctx.from.id;
     const session = await getSession(userId);
     const text = ctx.message.text.trim();
 
+    // ── Cupom ──────────────────────────────────────────────────────────────
     if (session.step === 'awaiting_coupon' && session.pendingProductId) {
       const couponCode = text.toUpperCase();
       try {
-        const result = await apiClient.validateCoupon(couponCode, session.pendingProductId);
-        if (result.valid) {
+        const products = await apiClient.getProducts();
+        const product = products.find((p) => p.id === session.pendingProductId);
+        const qty = session.pendingQty ?? 1;
+        const orderAmount = Number(product?.price ?? 0) * qty;
+
+        const result = await validateCoupon(couponCode, String(userId), orderAmount, session.pendingProductId);
+
+        if (result.valid && result.data) {
           session.pendingCoupon = couponCode;
-          session.pendingCouponDiscount = result.discountAmount ?? 0;
+          session.pendingCouponDiscount = result.data.discountAmount ?? 0;
           session.step = 'selecting_product';
           await saveSession(userId, session);
 
-          const [products, walletData] = await Promise.all([
-            apiClient.getProducts(),
+          const [, walletData] = await Promise.all([
+            Promise.resolve(),
             apiClient.getBalance(String(userId)).catch(() => ({ balance: 0 })),
           ]);
-          const product = products.find((p) => p.id === session.pendingProductId);
+
           if (product) {
             await ctx.reply(
-              `✅ Cupom <code>${couponCode}</code> aplicado! Desconto: R$ ${(result.discountAmount ?? 0).toFixed(2)}`,
+              `✅ Cupom <code>${couponCode}</code> aplicado! Desconto: R$ ${(result.data.discountAmount ?? 0).toFixed(2)}`,
               { parse_mode: 'HTML' }
             );
-            await showPaymentMethodScreen(ctx as never, product, Number(walletData.balance));
+            await showPaymentMethodScreen(ctx as unknown as Context, product, Number(walletData.balance));
           }
         } else {
-          await ctx.reply(`❌ Cupom inválido: ${result.message ?? 'Código não encontrado.'}`, { parse_mode: 'HTML' });
+          await ctx.reply(`❌ ${result.error ?? 'Cupom inválido.'}`, { parse_mode: 'HTML' });
         }
       } catch (err) {
-        captureError(err, { handler: 'coupon_validate', couponCode, userId });
+        console.error('[coupon_validate] erro:', err);
         await ctx.reply('❌ Erro ao validar cupom. Tente novamente.', { parse_mode: 'HTML' });
       }
       return;
     }
 
+    // ── Depósito ───────────────────────────────────────────────────────────
     if (session.step === 'awaiting_deposit_amount') {
       const amount = parseFloat(text.replace(',', '.'));
       if (isNaN(amount) || amount < 1) {
@@ -370,49 +390,55 @@ bot.on('text', async (ctx) => {
         return;
       }
       try {
-        const payment = await apiClient.createDeposit({ telegramId: String(userId), amount });
-        const qrText = payment.pixQrCode ?? payment.pixCopyPaste ?? '';
-        session.step = 'awaiting_payment';
-        session.depositPaymentId = payment.id;
-        session.pixExpiresAt = payment.expiresAt
-          ? new Date(payment.expiresAt).toISOString()
+        // createDeposit(telegramId, amount, firstName?, username?)
+        const deposit = await apiClient.createDeposit(
+          String(userId),
+          amount,
+          ctx.from.first_name,
+          ctx.from.username
+        );
+        const qrText = deposit.pixQrCodeText ?? deposit.pixQrCode ?? '';
+        const expiresAt = deposit.expiresAt
+          ? new Date(deposit.expiresAt).toISOString()
           : new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+        session.step = 'awaiting_payment';
+        session.depositPaymentId = deposit.paymentId;
+        session.pixExpiresAt = expiresAt;
         session.pixQrCodeText = qrText;
         await saveSession(userId, session);
 
         await ctx.replyWithPhoto(
           { url: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}` },
           {
-            caption: `💳 *Depósito de R\$ ${amount.toFixed(2).replace('.', '\\.')}*\n\nEscaneie o QR ou copie o código abaixo:`,
+            caption: `💳 *Depósito de R\$ ${String(amount.toFixed(2)).replace('.', '\\.')}*\n\nEscaneie o QR ou copie o código abaixo:`,
             parse_mode: 'MarkdownV2',
             reply_markup: Markup.inlineKeyboard([
-              [Markup.button.callback('🔄 Verificar Depósito', `check_payment_${payment.id}`)],
+              [Markup.button.callback('🔄 Verificar Depósito', `check_payment_${deposit.paymentId}`)],
             ]).reply_markup,
           }
         );
         await ctx.reply(`<code>${qrText}</code>`, { parse_mode: 'HTML' });
-        await schedulePIXExpiry(ctx as never, payment.id, userId, session.pixExpiresAt);
+        await schedulePIXExpiry(ctx as unknown as Context, deposit.paymentId, userId, expiresAt);
       } catch (err) {
-        captureError(err, { handler: 'deposit', userId, amount });
+        console.error('[deposit] erro:', err);
         await ctx.reply('❌ Erro ao gerar PIX de depósito.', { parse_mode: 'HTML' });
       }
       return;
     }
   } catch (err) {
-    captureError(err, { handler: 'on_text' });
-    logger.error('[on_text] Erro:', err);
+    console.error('[on_text] erro:', err);
   }
 });
 
-// ─── Launch ──────────────────────────────────────────────────────────────
-bot.launch({
-  dropPendingUpdates: true,
-}).then(() => {
-  logger.info('Bot iniciado com sucesso');
-}).catch((err) => {
-  logger.error('Erro ao iniciar bot:', err);
-  process.exit(1);
-});
+// ─── Launch ───────────────────────────────────────────────────────────────────
+
+bot.launch({ dropPendingUpdates: true })
+  .then(() => console.log('Bot iniciado com sucesso'))
+  .catch((err) => {
+    console.error('Erro ao iniciar bot:', err);
+    process.exit(1);
+  });
 
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
