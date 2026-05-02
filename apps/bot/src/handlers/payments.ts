@@ -21,6 +21,7 @@
  *                      oculta botão de cupom quando já existe cupom aplicado.
  * FIX-MDV2: escapa '!' e demais caracteres reservados do MarkdownV2 na caption do PIX.
  * FEAT-REMOVE-COUPON: botão 🗑️ Remover cupom na tela de método de pagamento.
+ * CACHE-BUST: 2026-05-02 — força recompilação deste arquivo pelo tsc.
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -108,10 +109,8 @@ export async function showPaymentMethodScreen(
   }
 
   if (session.pendingCoupon) {
-    // Cupom aplicado: mostra botão para remover
     buttons.push([Markup.button.callback('🗑️ Remover cupom', `remove_coupon_${product.id}`)]);
   } else {
-    // Sem cupom: mostra botão para adicionar
     buttons.push([Markup.button.callback('🏷️ Tenho um cupom', `coupon_input_${product.id}`)]);
   }
 
@@ -175,7 +174,6 @@ export async function executePayment(
   try {
     await editOrReply(ctx, '⏳ Processando sua compra, aguarde...', { parse_mode: 'HTML' });
 
-    // Usa cupom da sessão se não foi passado explicitamente
     const sessionForCoupon = await getSession(userId);
     const effectiveCoupon = couponCode ?? sessionForCoupon.pendingCoupon ?? undefined;
 
@@ -240,8 +238,8 @@ export async function executePayment(
 
     const qrBuffer = Buffer.from(payment.pixQrCode, 'base64');
 
-    // FIX-MDV2: todos os literais da caption devem ter caracteres reservados escapados.
-    // '!' é reservado no MarkdownV2 e causa 400 se não escapado.
+    // FIX-MDV2: '!' é reservado no MarkdownV2 — escapado manualmente no literal
+    // e via escapeMd() em todos os valores dinâmicos.
     const caption =
       `💳 *Pagamento PIX Gerado\!*\n\n` +
       `📦 *Produto:* ${escapeMd(payment.productName)}\n` +
@@ -296,7 +294,6 @@ export async function executePayment(
       return;
     }
 
-    // Erro de cupom — volta para tela de método com mensagem
     if (errStatus === 400 && (
       errMsg.includes('Cupom') || errMsg.includes('cupom') ||
       errMsg.includes('COUPON')
