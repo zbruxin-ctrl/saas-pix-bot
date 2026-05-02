@@ -2,6 +2,10 @@
  * Handlers de saldo: visualização, depósito via PIX.
  * PADRÃO: parse_mode HTML em todas as mensagens de texto.
  * Captions de replyWithPhoto usam MarkdownV2 (limitação do Telegram).
+ *
+ * FIX-DEPOSIT-SESSION-ORDER: session.depositPaymentId/depositMessageId só são
+ *   persistidos APÓS replyWithPhoto ter sucesso, evitando sessão orphan quando
+ *   o Telegram rejeita a mensagem com erro 400.
  */
 import { Context, Markup } from 'telegraf';
 import { escapeHtml, escapeMd } from '../utils/escape';
@@ -75,7 +79,6 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
 
   try {
     const deposit = await apiClient.createDeposit(String(userId), valor, ctx.from?.first_name, ctx.from?.username);
-    session.depositPaymentId = deposit.paymentId;
 
     await ctx.deleteMessage(processingMsg.message_id).catch(() => {});
 
@@ -87,7 +90,9 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
     });
 
     const qrBuffer = Buffer.from(deposit.pixQrCode, 'base64');
-    // caption de foto usa MarkdownV2 (Telegram não aceita HTML em captions de mídia da mesma forma)
+
+    // FIX-DEPOSIT-SESSION-ORDER: envia a foto PRIMEIRO.
+    // Se replyWithPhoto falhar, a sessão NÃO fica com depositPaymentId orphan.
     const depositMsg = await ctx.replyWithPhoto(
       { source: qrBuffer },
       {
@@ -106,6 +111,8 @@ export async function handleDepositAmount(ctx: Context, text: string): Promise<v
       }
     );
 
+    // Foto enviada com sucesso — agora é seguro persistir os IDs
+    session.depositPaymentId = deposit.paymentId;
     session.depositMessageId = depositMsg.message_id;
     session.mainMessageId = depositMsg.message_id;
     await saveSession(userId, session);
