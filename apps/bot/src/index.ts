@@ -1,1 +1,1 @@
-placeholder_index
+INDEX_CONTENT_PLACEHOLDER
