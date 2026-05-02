@@ -41,6 +41,10 @@
 // VARREDURA2-FIX #2: _payWithPix/_payMixed: revertCoupon+revertReferral ao cancelar por falta de estoque
 // VARREDURA2-FIX #3: cancelExpiredPayment + getPaymentStatus: revertCoupon ao expirar
 // VARREDURA2-FIX #4: _payWithBalance: OrderStatus.PROCESSING via enum (não string literal)
+// VARREDURA2-FIX #5: _payMixed: revertReferral ao cancelar por falta de estoque
+// VARREDURA2-FIX #6: processApprovedPayment: guard order null → loga erro crítico e retorna
+// VARREDURA2-FIX #7: cancelExpiredPayment + getPaymentStatus: cancela PIX no Mercado Pago ao expirar
+// VARREDURA2-FIX #8: _payMixed: verifica estoque disponível ANTES de criar PIX no MP
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus, OrderStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -446,6 +450,10 @@ export class PaymentService {
           } catch (estornoErr) {
             logger.error(`[Wallet] CRÍTICO: falha no estorno do payment ${payment.id}`, estornoErr);
           }
+          // VARREDURA2-FIX #5 (balance): reverte cupom e referral no estorno por estoque
+          await revertCoupon(payment.id).catch((e) =>
+            logger.error(`[Wallet] Falha ao reverter cupom para payment ${payment.id}:`, e)
+          );
           await prisma.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() } });
           throw new AppError('Produto sem estoque disponível.', 409);
         }
@@ -523,7 +531,14 @@ export class PaymentService {
     try {
       logger.info(`[Mixed] Usuário ${telegramUser.id}: saldo=${balanceUsed}, PIX=${pixAmount}`);
 
+      // VARREDURA2-FIX #8: verifica estoque ANTES de criar PIX no MP (igual ao _payWithPix)
       const hasStockItems = await this.productHasStockItems(product.id);
+      if (product.stock !== null || hasStockItems) {
+        const available = await stockService.getAvailableStock(product.id);
+        if (available !== null && available <= 0) {
+          throw new AppError('Produto sem estoque disponível.', 409);
+        }
+      }
 
       const externalReference = randomUUID();
       const mpPayment = await mercadoPagoService.createPixPayment({
@@ -585,10 +600,14 @@ export class PaymentService {
           invalidateStockItemCache(product.id);
         } catch (err) {
           logger.error(`[Mixed] Erro ao reservar estoque para payment ${payment.id}:`, err);
-          // VARREDURA2-FIX #2: reverte cupom e referral antes de cancelar
+          // VARREDURA2-FIX #2 + #5: reverte cupom E referral antes de cancelar
           await revertCoupon(payment.id).catch((e) =>
             logger.error(`[Mixed] Falha ao reverter cupom para payment ${payment.id}:`, e)
           );
+          // Reverte referral: cancela o registro criado na $transaction
+          await prisma.referral.deleteMany({
+            where: { paymentId: payment.id, rewardPaid: false },
+          }).catch((e) => logger.error(`[Mixed] Falha ao reverter referral para payment ${payment.id}:`, e));
           await prisma.payment.update({
             where: { id: payment.id },
             data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
@@ -658,7 +677,6 @@ export class PaymentService {
     }
 
     // VARREDURA2-FIX #1: verifica estoque ANTES de criar o PIX no Mercado Pago
-    // Evita gerar QR Code para produto sem estoque (e ter que cancelar/refundar depois)
     const hasStockItems = await this.productHasStockItems(product.id);
     if (product.stock !== null || hasStockItems) {
       const available = await stockService.getAvailableStock(product.id);
@@ -731,6 +749,10 @@ export class PaymentService {
         await revertCoupon(payment.id).catch((e) =>
           logger.error(`[PIX] Falha ao reverter cupom para payment ${payment.id}:`, e)
         );
+        // Reverte referral
+        await prisma.referral.deleteMany({
+          where: { paymentId: payment.id, rewardPaid: false },
+        }).catch((e) => logger.error(`[PIX] Falha ao reverter referral para payment ${payment.id}:`, e));
         await prisma.payment.update({
           where: { id: payment.id },
           data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
@@ -982,10 +1004,14 @@ export class PaymentService {
       return;
     }
 
-    const orderId = payment.order?.id ?? paymentId;
+    // VARREDURA2-FIX #6: guard order null — evita entregar com ID errado
+    if (!payment.order) {
+      logger.error(`[processApproved] CRÍTICO: order não encontrada para payment ${paymentId} — entrega abortada`);
+      return;
+    }
 
     await deliveryService.deliver(
-      orderId,
+      payment.order.id,
       payment.telegramUser as Parameters<typeof deliveryService.deliver>[1],
       payment.product as Parameters<typeof deliveryService.deliver>[2]
     ).catch((err) => {
@@ -1009,7 +1035,7 @@ export class PaymentService {
   async cancelExpiredPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { status: true },
+      select: { status: true, mercadoPagoId: true },
     });
     if (!payment || payment.status !== PaymentStatus.PENDING) return;
 
@@ -1031,6 +1057,15 @@ export class PaymentService {
       logger.warn(`[ExpireJob] revertCoupon falhou para ${paymentId}:`, err)
     );
 
+    // VARREDURA2-FIX #7: cancela PIX no Mercado Pago ao expirar (igual ao cancelPayment manual)
+    if (payment.mercadoPagoId) {
+      try {
+        await mercadoPagoService.refundPayment(payment.mercadoPagoId);
+      } catch (err) {
+        logger.warn(`[ExpireJob] Falha ao cancelar PIX no MP (${payment.mercadoPagoId}): ignorado`, err);
+      }
+    }
+
     logger.info(`[ExpireJob] Payment ${paymentId} expirado`);
   }
 
@@ -1044,7 +1079,7 @@ export class PaymentService {
 
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { status: true, approvedAt: true, pixExpiresAt: true },
+      select: { status: true, approvedAt: true, pixExpiresAt: true, mercadoPagoId: true },
     });
 
     if (!payment) throw new AppError('Pagamento não encontrado.', 404);
@@ -1072,6 +1107,13 @@ export class PaymentService {
       await revertCoupon(paymentId).catch((err) =>
         logger.warn(`[getPaymentStatus] revertCoupon falhou para ${paymentId}:`, err)
       );
+
+      // VARREDURA2-FIX #7: cancela PIX no Mercado Pago ao expirar via polling
+      if (payment.mercadoPagoId) {
+        mercadoPagoService.refundPayment(payment.mercadoPagoId).catch((err) =>
+          logger.warn(`[getPaymentStatus] Falha ao cancelar PIX no MP (${payment.mercadoPagoId}): ignorado`, err)
+        );
+      }
     }
 
     statusCache.set(paymentId, { status, expiresAt: now + statusCacheTTL });
