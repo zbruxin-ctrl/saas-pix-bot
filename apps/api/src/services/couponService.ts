@@ -1,4 +1,6 @@
 // couponService.ts — validação, aplicação e reversão de cupons
+// VARREDURA2-FIX: applyCoupon usa updateMany WHERE usedCount < maxUses para evitar
+//   race condition entre validateCoupon e applyCoupon (double-spend de cupom).
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 
@@ -88,23 +90,48 @@ export async function validateCoupon(
 }
 
 /**
- * Consome o cupom: cria CouponUse e incrementa usedCount atomicamente.
- * Deve ser chamado após confirmão de pagamento (ou no momento da criação do PIX).
+ * Consome o cupom de forma atômica e race-safe:
+ * - Usa updateMany WHERE usedCount < maxUses (ou maxUses IS NULL) para garantir
+ *   que dois requests concorrentes não ultrapassem o limite.
+ * - Se count === 0, o cupom foi esgotado entre a validação e o consumo → lança erro.
  */
 export async function applyCoupon(
   couponId: string,
   telegramUserId: string,
   paymentId: string
 ): Promise<void> {
-  await prisma.$transaction([
-    prisma.couponUse.create({
-      data: { couponId, telegramUserId, paymentId },
-    }),
-    prisma.coupon.update({
-      where: { id: couponId },
+  // Lê maxUses para saber se precisa usar a condição de guard
+  const coupon = await prisma.coupon.findUnique({
+    where: { id: couponId },
+    select: { maxUses: true, usedCount: true },
+  });
+
+  if (!coupon) throw new Error(`Cupom ${couponId} não encontrado ao tentar aplicar.`);
+
+  await prisma.$transaction(async (tx) => {
+    // Incrementa usedCount com guard race-safe
+    const updated = await tx.coupon.updateMany({
+      where: {
+        id: couponId,
+        // Se maxUses é null (ilimitado), sempre pode incrementar
+        // Se maxUses é definido, só incrementa se ainda há espaço
+        ...(coupon.maxUses !== null
+          ? { usedCount: { lt: coupon.maxUses } }
+          : {}),
+      },
       data: { usedCount: { increment: 1 } },
-    }),
-  ]);
+    });
+
+    if (updated.count === 0) {
+      // Outro processo consumiu o último uso entre validateCoupon e applyCoupon
+      throw new Error('Cupom esgotado: limite de usos atingido por outro request simultâneo.');
+    }
+
+    await tx.couponUse.create({
+      data: { couponId, telegramUserId, paymentId },
+    });
+  });
+
   logger.info(`[coupon] Aplicado couponId=${couponId} paymentId=${paymentId}`);
 }
 

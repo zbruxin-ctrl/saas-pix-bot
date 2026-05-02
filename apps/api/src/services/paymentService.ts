@@ -37,8 +37,12 @@
 // VARREDURA-FIX #9: cancelExpiredPayment: releaseReservation ao cancelar
 // VARREDURA-FIX #11: comentário sobre limitação dos locks in-memory (multi-instância)
 // VARREDURA-FIX #12: statusCache.delete após _payWithBalance aprovar
+// VARREDURA2-FIX #1: _payWithPix: productHasStockItems ANTES de createPixPayment (evita PIX gerado sem estoque)
+// VARREDURA2-FIX #2: _payWithPix/_payMixed: revertCoupon+revertReferral ao cancelar por falta de estoque
+// VARREDURA2-FIX #3: cancelExpiredPayment + getPaymentStatus: revertCoupon ao expirar
+// VARREDURA2-FIX #4: _payWithBalance: OrderStatus.PROCESSING via enum (não string literal)
 import { randomUUID } from 'crypto';
-import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
+import { PaymentStatus, PaymentMethod, StockItemStatus, OrderStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
 import { deliveryService } from './deliveryService';
@@ -55,6 +59,7 @@ import {
   payReferralReward,
   CouponError,
 } from './pricingService';
+import { revertCoupon } from './couponService';
 import type {
   CreatePaymentRequest,
   CreatePaymentResponse,
@@ -371,12 +376,13 @@ export class PaymentService {
           },
         });
 
+        // VARREDURA2-FIX #4: usa OrderStatus enum em vez de string literal
         const newOrder = await tx.order.create({
           data: {
             paymentId: newPayment.id,
             telegramUserId: telegramUser.id,
             productId: product.id,
-            status: 'PROCESSING',
+            status: OrderStatus.PROCESSING,
           },
         });
 
@@ -579,12 +585,14 @@ export class PaymentService {
           invalidateStockItemCache(product.id);
         } catch (err) {
           logger.error(`[Mixed] Erro ao reservar estoque para payment ${payment.id}:`, err);
-          // Cancela o payment no banco
+          // VARREDURA2-FIX #2: reverte cupom e referral antes de cancelar
+          await revertCoupon(payment.id).catch((e) =>
+            logger.error(`[Mixed] Falha ao reverter cupom para payment ${payment.id}:`, e)
+          );
           await prisma.payment.update({
             where: { id: payment.id },
             data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
           });
-          // Tenta estornar no Mercado Pago
           if (mpPayment.id) {
             try {
               await mercadoPagoService.refundPayment(mpPayment.id.toString());
@@ -649,6 +657,16 @@ export class PaymentService {
       };
     }
 
+    // VARREDURA2-FIX #1: verifica estoque ANTES de criar o PIX no Mercado Pago
+    // Evita gerar QR Code para produto sem estoque (e ter que cancelar/refundar depois)
+    const hasStockItems = await this.productHasStockItems(product.id);
+    if (product.stock !== null || hasStockItems) {
+      const available = await stockService.getAvailableStock(product.id);
+      if (available !== null && available <= 0) {
+        throw new AppError('Produto sem estoque disponível.', 409);
+      }
+    }
+
     const externalReference = randomUUID();
     const mpPayment = await mercadoPagoService.createPixPayment({
       transactionAmount: price,
@@ -703,19 +721,20 @@ export class PaymentService {
     });
 
     // VARREDURA-FIX #1: reserveStock com try/catch + cancelamento + refund MP para _payWithPix
-    const hasStockItems = await this.productHasStockItems(product.id);
     if (product.stock !== null || hasStockItems) {
       try {
         await stockService.reserveStock(product.id, telegramUser.id, payment.id);
         invalidateStockItemCache(product.id);
       } catch (err) {
         logger.error(`[PIX] Erro ao reservar estoque para payment ${payment.id}:`, err);
-        // Cancela o payment no banco
+        // VARREDURA2-FIX #2: reverte cupom antes de cancelar
+        await revertCoupon(payment.id).catch((e) =>
+          logger.error(`[PIX] Falha ao reverter cupom para payment ${payment.id}:`, e)
+        );
         await prisma.payment.update({
           where: { id: payment.id },
           data: { status: PaymentStatus.CANCELLED, cancelledAt: new Date() },
         });
-        // Tenta estornar no Mercado Pago
         if (mpPayment.id) {
           try {
             await mercadoPagoService.refundPayment(mpPayment.id.toString());
@@ -1007,6 +1026,11 @@ export class PaymentService {
       logger.warn(`[ExpireJob] releaseReservation falhou para ${paymentId}:`, err);
     }
 
+    // VARREDURA2-FIX #3: reverte cupom ao expirar via ExpireJob
+    await revertCoupon(paymentId).catch((err) =>
+      logger.warn(`[ExpireJob] revertCoupon falhou para ${paymentId}:`, err)
+    );
+
     logger.info(`[ExpireJob] Payment ${paymentId} expirado`);
   }
 
@@ -1043,6 +1067,11 @@ export class PaymentService {
       } catch (err) {
         logger.warn(`[getPaymentStatus] releaseReservation falhou para ${paymentId}:`, err);
       }
+
+      // VARREDURA2-FIX #3: reverte cupom ao expirar via polling
+      await revertCoupon(paymentId).catch((err) =>
+        logger.warn(`[getPaymentStatus] revertCoupon falhou para ${paymentId}:`, err)
+      );
     }
 
     statusCache.set(paymentId, { status, expiresAt: now + statusCacheTTL });

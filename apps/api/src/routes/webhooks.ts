@@ -14,6 +14,8 @@
 //   antes, aceitava silenciosamente qualquer request sem assinatura, permitindo fraude.
 // AUDIT #10: validateWebhookSignature valida que o timestamp `ts` está dentro de
 //   ±5 minutos da hora atual — proteção anti-replay attack.
+// VARREDURA2-FIX #5: fallback de busca de pagamento usa metadata.externalReference
+//   em vez de payment.id, corrigindo caso onde mercadoPagoId não estava salvo.
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { Prisma, WebhookEventStatus } from '@prisma/client';
@@ -178,12 +180,25 @@ async function processWebhookAsync(
       return;
     }
 
-    const internalPayment =
-      await prisma.payment.findUnique({ where: { mercadoPagoId: externalId } }) ||
-      await prisma.payment.findUnique({ where: { id: mpPayment.external_reference } });
+    // VARREDURA2-FIX #5: corrige fallback de busca do pagamento interno.
+    // Antes: findUnique({ where: { id: mpPayment.external_reference } }) buscava pelo
+    // campo `id` da tabela Payment usando o externalReference (UUID), que nunca coincide.
+    // Agora: busca por metadata.externalReference, que é onde o UUID é gravado.
+    let internalPayment = await prisma.payment.findUnique({ where: { mercadoPagoId: externalId } });
+
+    if (!internalPayment && mpPayment.external_reference) {
+      internalPayment = await prisma.payment.findFirst({
+        where: {
+          metadata: {
+            path: ['externalReference'],
+            equals: mpPayment.external_reference,
+          },
+        },
+      });
+    }
 
     if (!internalPayment) {
-      logger.error(`Webhook: pagamento interno não encontrado para MP ID ${externalId}`);
+      logger.error(`Webhook: pagamento interno não encontrado para MP ID ${externalId} | external_reference=${mpPayment.external_reference}`);
       await prisma.webhookEvent.update({
         where: { id: webhookEventId },
         data: {
@@ -261,8 +276,7 @@ function validateWebhookSignature(req: Request, body: string): boolean {
     if (expectedBuf.length !== receivedBuf.length) return false;
 
     return crypto.timingSafeEqual(expectedBuf, receivedBuf);
-  } catch (error) {
-    logger.error('Erro ao validar assinatura do webhook:', error);
+  } catch {
     return false;
   }
 }
