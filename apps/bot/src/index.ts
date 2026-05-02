@@ -32,7 +32,7 @@ import {
   showPaymentMethodScreen,
   schedulePIXExpiry,
 } from './handlers/payments';
-import { handleReferral, processReferralStart } from './handlers/referral';
+import { handleReferral, showReferralMenu, processReferralStart } from './handlers/referral';
 
 import type { ProductDTO } from '@saas-pix/shared';
 
@@ -133,6 +133,12 @@ bot.action('show_orders', async (ctx) => {
 bot.action('show_balance', async (ctx) => {
   await ctx.answerCbQuery('⏳ Buscando saldo...').catch(() => {});
   try { await showBalance(ctx); } catch (err) { captureError(err, { handler: 'show_balance' }); }
+});
+
+// ─── Action: Indique e Ganhe ──────────────────────────────────────────────────
+bot.action('show_referral', async (ctx) => {
+  await ctx.answerCbQuery('🎁 Carregando...').catch(() => {});
+  try { await showReferralMenu(ctx); } catch (err) { captureError(err, { handler: 'show_referral' }); }
 });
 
 bot.action('deposit_balance', async (ctx) => {
