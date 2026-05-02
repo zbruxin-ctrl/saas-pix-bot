@@ -12,13 +12,14 @@
  * FIX-COUPON-DISCOUNT: salva discountAmount na sessão para uso na tela de pagamento.
  * FEAT-REMOVE-COUPON: action remove_coupon_ limpa cupom da sessão e volta para
  *                     tela de método de pagamento sem desconto.
+ * FIX-START-BUTTONS: /start com PIX pendente agora envia botões de Verificar/Cancelar.
  */
 
 import { initSentry, captureError } from './config/sentry';
 initSentry();
 
 import express from 'express';
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { env } from './config/env';
 import { apiClient, invalidateProductCache, invalidateBotConfigCache } from './services/apiClient';
@@ -78,11 +79,18 @@ bot.command('start', async (ctx) => {
         }
       }
 
+      // FIX-START-BUTTONS: envia os botões de Verificar/Cancelar junto com o aviso
       await ctx.reply(
         '⚠️ Você tem um <b>pagamento PIX em andamento</b>!\n\n' +
-        'Use os botões acima para verificar ou cancelar.\n' +
+        'Use os botões abaixo para verificar ou cancelar.\n' +
         'Ou aguarde expirar automaticamente em 30 minutos.',
-        { parse_mode: 'HTML' }
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Verificar Pagamento', `check_payment_${existing.paymentId}`)],
+            [Markup.button.callback('❌ Cancelar PIX', `cancel_payment_${existing.paymentId}`)],
+          ]).reply_markup,
+        }
       );
       return;
     }
@@ -207,262 +215,3 @@ bot.action(/^remove_coupon_(.+)$/, async (ctx) => {
     const session = await getSession(userId);
     delete session.pendingCoupon;
     delete session.pendingCouponDiscount;
-    session.step = 'selecting_product';
-    await saveSession(userId, session);
-    const products = await apiClient.getProducts();
-    const product = products.find((p) => p.id === productId);
-    if (!product) {
-      await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
-      return;
-    }
-    await showPaymentMethodScreen(ctx, product);
-  } catch (err) {
-    captureError(err, { handler: 'remove_coupon' });
-  }
-});
-
-// ─── Seleção de produto ───────────────────────────────────────────────────────
-bot.action(/^select_product_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery('⏳ Carregando produto...').catch(() => {});
-  try {
-    const productId = ctx.match[1];
-    const userId = ctx.from!.id;
-    const session = await getSession(userId);
-
-    let product: ProductDTO | undefined;
-    let balanceResult = 0;
-
-    try {
-      const [products, walletData] = await Promise.all([
-        apiClient.getProducts(),
-        apiClient.getBalance(String(userId)).catch(() => ({ balance: 0, transactions: [] })),
-      ]);
-      product = products.find((p) => p.id === productId);
-      session.products = products as never;
-      balanceResult = Number(walletData.balance);
-      await saveSession(userId, session);
-    } catch (err) {
-      captureError(err, { handler: 'select_product', productId, userId });
-      await ctx.reply('❌ Erro ao buscar produto. Tente novamente.', { parse_mode: 'HTML' });
-      return;
-    }
-
-    if (!product) {
-      await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
-      return;
-    }
-
-    if (product.stock != null && product.stock <= 0) {
-      await ctx.reply('⚠️ Este produto está esgotado no momento.', { parse_mode: 'HTML' });
-      return;
-    }
-
-    session.selectedProductId = productId;
-    session.step = 'selecting_product';
-    await saveSession(userId, session);
-
-    await showPaymentMethodScreen(ctx, product, balanceResult);
-  } catch (err) {
-    captureError(err, { handler: 'select_product_action' });
-    console.error('[select_product] Erro inesperado:', err);
-  }
-});
-
-// ─── Ações de pagamento ───────────────────────────────────────────────────────
-bot.action(/^pay_pix_(.+)$/, async (ctx) => {
-  await executePayment(ctx, ctx.match[1], 'PIX');
-});
-
-bot.action(/^pay_balance_(.+)$/, async (ctx) => {
-  await executePayment(ctx, ctx.match[1], 'BALANCE');
-});
-
-bot.action(/^pay_mixed_(.+)$/, async (ctx) => {
-  await executePayment(ctx, ctx.match[1], 'MIXED');
-});
-
-bot.action(/^pay_mixed_coupon_(.+)$/, async (ctx) => {
-  await executePayment(ctx, ctx.match[1], 'MIXED');
-});
-
-bot.action(/^check_payment_(.+)$/, async (ctx) => {
-  await handleCheckPayment(ctx, ctx.match[1]);
-});
-
-bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
-  await handleCancelPayment(ctx, ctx.match[1]);
-});
-
-// ─── Mensagens de texto ───────────────────────────────────────────────────────
-bot.on(message('text'), async (ctx) => {
-  try {
-    const userId = ctx.from!.id;
-    const text = ctx.message.text.trim();
-    const session = await getSession(userId);
-
-    if (session.step === 'awaiting_deposit_amount') {
-      await handleDepositAmount(ctx, text);
-      return;
-    }
-
-    // Usuário digitou o código do cupom
-    if (session.step === 'awaiting_coupon' && session.pendingProductId) {
-      const productId = session.pendingProductId;
-      const couponCode = text.toUpperCase().trim();
-
-      const { validateCoupon } = await import('./services/couponClient');
-      const products = await apiClient.getProducts();
-      const product = products.find((p) => p.id === productId);
-      const price = product ? Number(product.price) : 0;
-
-      // FIX: sem .catch() silencioso — erros reais de rede são capturados pelo
-      // try/catch externo e logados pelo Sentry. O .catch() anterior engolia
-      // falhas de conexão e retornava "inválido" sem nunca chamar a API.
-      const result = await validateCoupon(couponCode, String(userId), price, productId);
-
-      if (!result.valid) {
-        await ctx.reply(
-          `❌ <b>${result.error ?? 'Cupom inválido ou expirado.'}</b>\n\nDigite outro código ou clique em Pular.`,
-          {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '⏭️ Pular', callback_data: `skip_coupon_${productId}` }],
-                [{ text: '◀️ Voltar', callback_data: `select_product_${productId}` }],
-              ],
-            },
-          }
-        );
-        return;
-      }
-
-      // FIX: guard ANTES do saveSession para não sujar a sessão em caso de
-      // result.data ausente (não deveria ocorrer, mas defesa extra).
-      if (!result.data) {
-        captureError(new Error('validateCoupon retornou valid=true mas sem data'), { couponCode, productId });
-        await ctx.reply('❌ Erro ao processar cupom. Tente novamente.', { parse_mode: 'HTML' });
-        return;
-      }
-
-      const d = result.data;
-
-      // Salva na sessão somente após validar tudo
-      session.pendingCoupon = couponCode;
-      session.pendingCouponDiscount = d.discountAmount; // FIX-COUPON-DISCOUNT
-      session.mainMessageId = undefined;
-      session.step = 'selecting_product';
-      await saveSession(userId, session);
-
-      await ctx.reply(
-        `✅ <b>Cupom aplicado!</b>\n\n` +
-        `🏷️ Código: <code>${couponCode}</code>\n` +
-        `💰 Desconto: <b>R$ ${d.discountAmount.toFixed(2)}</b>\n` +
-        `✅ Total com desconto: <b>R$ ${d.finalAmount.toFixed(2)}</b>\n\n` +
-        `Agora escolha como pagar ⬇️`,
-        { parse_mode: 'HTML' }
-      );
-
-      if (product) await showPaymentMethodScreen(ctx, product);
-      return;
-    }
-
-    await ctx.reply('Use /start para acessar o menu principal.', { parse_mode: 'HTML' });
-  } catch (err) {
-    captureError(err, { handler: 'text_message' });
-    console.error('[text] Erro inesperado:', err);
-  }
-});
-
-// ─── Servidor Express (Webhook) ───────────────────────────────────────────────
-const app = express();
-app.use(express.json());
-
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', bot: bot.botInfo?.username ?? 'loading' });
-});
-
-app.post('/invalidate-cache', (req, res) => {
-  const secret = req.headers['x-bot-secret'];
-  if (secret !== env.TELEGRAM_BOT_SECRET) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
-  const { type, telegramId } = req.body as { type?: string; telegramId?: string };
-  if (type === 'products') invalidateProductCache();
-  if (type === 'bot-config') invalidateBotConfigCache(telegramId);
-  res.json({ ok: true });
-});
-
-const webhookPath = '/telegram-webhook';
-
-app.post(webhookPath, async (req, res) => {
-  if (env.TELEGRAM_BOT_SECRET) {
-    const incoming = req.headers['x-telegram-bot-api-secret-token'];
-    if (incoming !== env.TELEGRAM_BOT_SECRET) {
-      console.warn('[webhook] Secret token inválido — request ignorado');
-      res.status(403).send('Forbidden');
-      return;
-    }
-  }
-
-  const update = req.body as { update_id?: number };
-
-  if (update.update_id) {
-    const isNew = await markUpdateProcessed(update.update_id).catch(() => true);
-    if (!isNew) {
-      res.sendStatus(200);
-      return;
-    }
-  }
-
-  try {
-    await bot.handleUpdate(req.body);
-  } catch (err) {
-    captureError(err, { handler: 'webhook' });
-    console.error('[webhook] Erro ao processar update:', err);
-  }
-
-  res.sendStatus(200);
-});
-
-const PORT = Number(process.env.PORT) || 8080;
-
-async function start() {
-  try {
-    await bot.telegram.setMyCommands([
-      { command: 'start', description: '🏠 Menu principal' },
-      { command: 'produtos', description: '🛒 Ver produtos disponíveis' },
-      { command: 'saldo', description: '💰 Ver meu saldo' },
-      { command: 'meus_pedidos', description: '📦 Ver meus pedidos' },
-      { command: 'indicar', description: '🎁 Indicar amigos e ganhar bônus' },
-      { command: 'ajuda', description: '❓ Ajuda e suporte' },
-    ]);
-    console.log('✅ Menu de comandos registrado no Telegram');
-
-    const webhookUrl = env.BOT_WEBHOOK_URL
-      ? `${env.BOT_WEBHOOK_URL}${webhookPath}`
-      : null;
-
-    if (webhookUrl) {
-      await bot.telegram.setWebhook(webhookUrl, {
-        secret_token: env.TELEGRAM_BOT_SECRET || undefined,
-      });
-      console.log(`🤖 Webhook registrado: ${webhookUrl}`);
-    } else {
-      console.warn('⚠️  BOT_WEBHOOK_URL não configurado — bot não receberá updates!');
-    }
-
-    const botInfo = await bot.telegram.getMe();
-    console.log(`📌 Bot username: @${botInfo.username}`);
-
-    app.listen(PORT, () => {
-      console.log(`🚀 Servidor webhook escutando na porta ${PORT}`);
-    });
-  } catch (err) {
-    captureError(err, { handler: 'start' });
-    console.error('❌ Falha ao iniciar o bot:', err);
-    process.exit(1);
-  }
-}
-
-start();
