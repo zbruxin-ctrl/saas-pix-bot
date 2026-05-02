@@ -16,6 +16,7 @@
  * FIX-WELCOME: showHome busca welcomeMessage via apiClient.getBotConfig() (painel admin).
  * FIX-MD2HTML: welcomeMessage convertida de Markdown para HTML antes de exibir.
  * FIX-NODUP: cabeçalho hardcoded removido — welcomeMessage já contém o cabeçalho completo.
+ * FEAT-WELCOME-VARS: placeholders {firstName}, {nome}, {name} e {username} agora são substituídos dinamicamente.
  */
 import { Telegraf, Markup } from 'telegraf';
 import type { Context } from 'telegraf';
@@ -45,7 +46,6 @@ const bot = new Telegraf(BOT_TOKEN);
 
 initPaymentHandlers();
 
-// Cache do username do bot (evita chamar getMe() a cada /indicacoes)
 let cachedBotUsername: string | null = null;
 async function getBotUsername(): Promise<string> {
   if (!cachedBotUsername) {
@@ -55,8 +55,6 @@ async function getBotUsername(): Promise<string> {
   return cachedBotUsername;
 }
 
-// ─── Markdown → HTML helper ───────────────────────────────────────────────────
-// Converte subset básico de Markdown para HTML (parse_mode: HTML).
 function mdToHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -69,19 +67,27 @@ function mdToHtml(text: string): string {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
 }
 
-// ─── showHome ─────────────────────────────────────────────────────────────────
+function applyWelcomeVars(text: string, ctx: Context): string {
+  const firstName = ctx.from?.first_name?.trim() || 'cliente';
+  const username = ctx.from?.username?.trim() || '';
+
+  return text
+    .replace(/\{firstName\}/gi, firstName)
+    .replace(/\{name\}/gi, firstName)
+    .replace(/\{nome\}/gi, firstName)
+    .replace(/\{username\}/gi, username ? `@${username}` : '');
+}
 
 const DEFAULT_WELCOME =
-  '👋 Olá! Bem-vindo!\n\n' +
+  '👋 Olá, {firstName}! Bem-vindo!\n\n' +
   '🛒 Aqui você pode adquirir nossos produtos de forma rápida e segura.\n\n' +
   '💳 Aceitamos pagamento via <b>PIX</b> (confirmação instantânea) ou via <b>saldo pré-carregado</b>.';
 
 async function showHome(ctx: Context): Promise<void> {
   const config = await apiClient.getBotConfig().catch(() => ({ welcomeMessage: '' }));
-  // welcomeMessage do banco é a mensagem completa (já inclui saudação, corpo, etc.)
-  // Não adicionamos nenhum cabeçalho fixo aqui para evitar duplicação.
   const rawMsg = config.welcomeMessage?.trim();
-  const welcomeMsg = rawMsg ? mdToHtml(rawMsg) : DEFAULT_WELCOME;
+  const baseMsg = rawMsg || DEFAULT_WELCOME;
+  const welcomeMsg = mdToHtml(applyWelcomeVars(baseMsg, ctx));
 
   const text = `${welcomeMsg}\n\nPara ver nossos produtos, clique no botão abaixo:`;
 
@@ -97,12 +103,10 @@ async function showHome(ctx: Context): Promise<void> {
     try {
       await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
       return;
-    } catch { /* mensagem idêntica — ignora */ }
+    } catch {}
   }
   await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
 }
-
-// ─── /start ───────────────────────────────────────────────────────────────────
 
 bot.start(async (ctx) => {
   try {
@@ -111,7 +115,7 @@ bot.start(async (ctx) => {
     const referralCode = ctx.startPayload || undefined;
 
     if (referralCode && referralCode !== String(userId)) {
-      try { await registerReferral(referralCode, String(userId)); } catch { /**/ }
+      try { await registerReferral(referralCode, String(userId)); } catch {}
       if (!session.referralCode) {
         session.referralCode = referralCode;
       }
@@ -145,8 +149,6 @@ bot.action('show_home', async (ctx) => {
   await showHome(ctx);
 });
 
-// ─── /produtos ────────────────────────────────────────────────────────────────
-
 async function showProducts(ctx: Context): Promise<void> {
   try {
     const products = await apiClient.getProducts();
@@ -176,7 +178,7 @@ async function showProducts(ctx: Context): Promise<void> {
       try {
         await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: replyMarkup });
         return;
-      } catch { /* ignora */ }
+      } catch {}
     }
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: replyMarkup });
   } catch (err) {
@@ -191,8 +193,6 @@ bot.action('show_products', async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produtos...').catch(() => {});
   await showProducts(ctx);
 });
-
-// ─── /saldo ───────────────────────────────────────────────────────────────────
 
 async function showBalance(ctx: Context): Promise<void> {
   try {
@@ -230,7 +230,7 @@ async function showBalance(ctx: Context): Promise<void> {
       try {
         await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
         return;
-      } catch { /* ignora */ }
+      } catch {}
     }
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
   } catch (err) {
@@ -278,8 +278,6 @@ bot.action('cancel_deposit', async (ctx) => {
   await showBalance(ctx);
 });
 
-// ─── /pedidos ─────────────────────────────────────────────────────────────────
-
 async function showOrders(ctx: Context): Promise<void> {
   const userId = ctx.from!.id;
   try {
@@ -292,7 +290,7 @@ async function showOrders(ctx: Context): Promise<void> {
         [Markup.button.callback('◀️ Voltar', 'show_home')],
       ]);
       if (ctx.callbackQuery) {
-        try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
+        try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch {}
       }
       await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
       return;
@@ -312,7 +310,7 @@ async function showOrders(ctx: Context): Promise<void> {
       [Markup.button.callback('◀️ Voltar', 'show_home')],
     ]);
     if (ctx.callbackQuery) {
-      try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
+      try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch {}
     }
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
   } catch {
@@ -327,15 +325,13 @@ bot.action('show_orders', async (ctx) => {
   await showOrders(ctx);
 });
 
-// ─── Indicações ────────────────────────────────────────────────────────────────
-
 async function showReferral(ctx: Context): Promise<void> {
   try {
     const userId = ctx.from!.id;
     let referralInfo: { referralCount?: number; purchaseCount?: number; bonusEarned?: number } | null = null;
     try {
       referralInfo = await apiClient.getReferralInfo(String(userId));
-    } catch { /* ignora se endpoint não existir */ }
+    } catch {}
 
     const botUsername = await getBotUsername();
     const link        = `https://t.me/${botUsername}?start=${userId}`;
@@ -366,7 +362,7 @@ async function showReferral(ctx: Context): Promise<void> {
       try {
         await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
         return;
-      } catch { /* ignora */ }
+      } catch {}
     }
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
   } catch (err) {
@@ -381,8 +377,6 @@ bot.action('show_referral', async (ctx) => {
   await ctx.answerCbQuery('👥 Carregando indicações...').catch(() => {});
   await showReferral(ctx);
 });
-
-// ─── Ajuda ────────────────────────────────────────────────────────────────────
 
 async function showHelp(ctx: Context): Promise<void> {
   const config = await apiClient.getBotConfig().catch(() => ({ supportPhone: '' }));
@@ -424,7 +418,7 @@ async function showHelp(ctx: Context): Promise<void> {
         link_preview_options: { is_disabled: true },
       });
       return;
-    } catch { /* ignora */ }
+    } catch {}
   }
   await ctx.reply(text, {
     parse_mode: 'HTML',
@@ -440,8 +434,6 @@ bot.action('show_help', async (ctx) => {
   await showHelp(ctx);
 });
 
-// ─── Suporte ──────────────────────────────────────────────────────────────────
-
 bot.command('suporte', async (ctx) => {
   try {
     const config = await apiClient.getBotConfig().catch(() => ({ supportPhone: '' }));
@@ -454,8 +446,6 @@ bot.command('suporte', async (ctx) => {
     console.error('[showSupport] erro:', err);
   }
 });
-
-// ─── Seleção de produto → tela de quantidade ──────────────────────────────────
 
 bot.action(/^select_product_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produto...').catch(() => {});
@@ -488,8 +478,6 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Seleção de quantidade → tela de pagamento ────────────────────────────────
-
 bot.action(/^set_qty_(.+)_(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   try {
@@ -519,8 +507,6 @@ bot.action(/^set_qty_(.+)_(\d+)$/, async (ctx) => {
   }
 });
 
-// ─── Métodos de pagamento ─────────────────────────────────────────────────────
-
 bot.action(/^pay_pix_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   await executePayment(ctx, ctx.match[1], 'PIX');
@@ -535,8 +521,6 @@ bot.action(/^pay_mixed_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   await executePayment(ctx, ctx.match[1], 'MIXED');
 });
-
-// ─── Verificar / cancelar pagamento ──────────────────────────────────────────
 
 bot.action(/^check_payment_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -561,8 +545,6 @@ bot.action('cancel_payment', async (ctx) => {
     ]).reply_markup,
   });
 });
-
-// ─── Cupom ────────────────────────────────────────────────────────────────────
 
 bot.action(/^coupon_input_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -607,15 +589,12 @@ bot.action(/^remove_coupon_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Mensagens de texto (cupom / depósito) ────────────────────────────────────
-
 bot.on('text', async (ctx) => {
   try {
     const userId  = ctx.from.id;
     const session = await getSession(userId);
     const text    = ctx.message.text.trim();
 
-    // ── Cupom
     if (session.step === 'awaiting_coupon' && session.pendingProductId) {
       const productId = session.pendingProductId;
 
@@ -627,7 +606,7 @@ bot.on('text', async (ctx) => {
           const qty = session.pendingQty ?? 1;
           orderAmount = Number(product.price) * qty;
         }
-      } catch { /* usa 0 como fallback */ }
+      } catch {}
 
       const result = await validateCoupon(text.toUpperCase(), String(userId), orderAmount, productId);
 
@@ -659,7 +638,6 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // ── Depósito
     if (session.step === 'awaiting_deposit_amount') {
       const raw   = text.replace(',', '.');
       const value = parseFloat(raw);
@@ -732,8 +710,6 @@ bot.on('text', async (ctx) => {
     console.error('[bot.on text] erro:', err);
   }
 });
-
-// ─── Inicialização ────────────────────────────────────────────────────────────
 
 const WEBHOOK_URL  = process.env.WEBHOOK_URL;
 const WEBHOOK_PORT = parseInt(process.env.PORT ?? '3001', 10);
