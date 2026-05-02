@@ -3,6 +3,7 @@
 // FIX: re-exporta/implementa tudo que paymentService.ts espera:
 //   applyPricing, commitCouponUse, commitReferral, payReferralReward, CouponError
 // FIX-TYPES: callbacks de payReferralReward com tipos explícitos (L837/854/872)
+// FIX-BUILD: corrige campos Referral (referredId @unique, rewardPaid em vez de rewarded)
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 
@@ -241,7 +242,7 @@ export async function commitCouponUse(
 /**
  * Deve ser chamado DENTRO de uma $transaction de pagamento.
  * Registra a relação de referral (sem pagar recompensa ainda).
- * Idempotente: se já existir (referrerId+referredId), ignora.
+ * Idempotente: se já existir (referredId @unique), ignora silenciosamente.
  */
 export async function commitReferral(
   tx: PrismaTxClient,
@@ -250,25 +251,27 @@ export async function commitReferral(
   paymentId: string,
   rewardAmount: number
 ): Promise<void> {
-  // Idempotente — upsert pela chave única referrerId+referredId
-  await tx.referral.upsert({
-    where: { referrerId_referredId: { referrerId, referredId } },
-    update: {},
-    create: {
-      referrerId,
-      referredId,
-      paymentId,
-      rewardAmount,
-      rewarded: false,
-    },
-  });
+  // Idempotente — referredId é @unique, então tentamos criar e ignoramos conflito
+  try {
+    await tx.referral.create({
+      data: {
+        referrerId,
+        referredId,
+        paymentId,
+        rewardAmount,
+        rewardPaid: false,
+      },
+    });
+  } catch {
+    // Já existe (referredId @unique) — ignora silenciosamente
+  }
 }
 
 // ─── payReferralReward ──────────────────────────────────────────────────────────────────
 
 /**
  * Deve ser chamado DENTRO de uma $transaction de pagamento aprovado.
- * Busca o Referral pelo paymentId, marca como rewarded e invoca o callback
+ * Busca o Referral pelo paymentId, marca como rewardPaid e invoca o callback
  * para creditar o saldo do referrer (lógica de cartão mantida no paymentService).
  * Se não houver referral pendente, não faz nada.
  */
@@ -278,7 +281,7 @@ export async function payReferralReward(
   onReward: ReferralRewardCallback
 ): Promise<void> {
   const referral = await tx.referral.findFirst({
-    where: { paymentId, rewarded: false },
+    where: { paymentId, rewardPaid: false },
     select: { id: true, referrerId: true, rewardAmount: true },
   });
 
@@ -286,7 +289,7 @@ export async function payReferralReward(
 
   await tx.referral.update({
     where: { id: referral.id },
-    data: { rewarded: true, rewardedAt: new Date() },
+    data: { rewardPaid: true },
   });
 
   await onReward(
