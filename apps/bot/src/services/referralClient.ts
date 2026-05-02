@@ -6,6 +6,7 @@ const BOT_SECRET = process.env.BOT_SECRET!;
 
 export interface ReferralStats {
   totalReferred: number;
+  totalConverted: number;
   totalEarned: number;
   referrals: {
     id: string;
