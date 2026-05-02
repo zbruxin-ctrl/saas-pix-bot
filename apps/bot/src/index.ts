@@ -43,13 +43,15 @@ initPaymentHandlers();
 
 async function showHome(ctx: any) {
   const firstName = ctx.from?.first_name || 'visitante';
-  const text = `👋 <b>Olá, ${firstName}!</b>\n\nEscolha uma opção abaixo para continuar:`;
+  const text =
+    `👋 Olá, <b>${firstName}</b>! Bem-vindo!\n\n` +
+    `🛒 Aqui você pode adquirir nossos produtos de forma rápida e segura.\n\n` +
+    `💳 Aceitamos pagamento via <b>PIX</b> (confirmação instantânea) ou via <b>saldo pré-carregado</b>.\n\n` +
+    `Para ver nossos produtos, clique no botão abaixo:`;
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
-    [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
-    [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
-    [Markup.button.callback('❓ Ajuda', 'show_help')],
+    [Markup.button.callback('💰 Meu Saldo', 'show_balance'), Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
   ]);
 
   if (ctx.callbackQuery) {
