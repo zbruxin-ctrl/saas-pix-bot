@@ -5,21 +5,18 @@
 // PERF #5: cache de saldo por usuario TTL 15s
 // PERF #6: invalidacao do cache de saldo apos deposito
 // FEATURE: getOrders(telegramId)
-// FEATURE: getReferralInfo(telegramId)
+// FEATURE: getReferralInfo(telegramId) — chama /api/referrals/info
 // FIX-B17: createPayment distingue erro real de idempotencia
 // FEAT-MAINT: getBotConfig() busca maintenance_mode + maintenance_message
 //   com cache em memoria TTL 30s
 // FEAT-BLOCKED: getBotConfig(telegramId) tambem retorna isBlocked do usuario
 // SEC FIX #6: getPaymentStatus e cancelPayment agora enviam telegramId
 // PERF #7: timeout por operacao — createPayment/createDeposit usam 25s
-//   (Neon cold start + chamada Mercado Pago podem exceder 8s facilmente)
 // FIX-COUPON: createPayment aceita e envia couponCode e referralCode
 // AUDIT #2: Idempotency-Key em createPayment — janela de 2 minutos por
 //   userId+productId evita criar pagamento duplicado em retry de timeout.
-// AUDIT #12: fallback B17 filtra por productId — evita retornar pedido de
-//   produto diferente do solicitado na janela de 60s.
-// AUDIT #18: Axios com httpsAgent keepAlive:true — reutiliza conexões TCP
-//   e reduz latência de handshake em múltiplas requisições.
+// AUDIT #12: fallback B17 filtra por productId
+// AUDIT #18: Axios com httpsAgent keepAlive:true
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import https from 'https';
 import { env } from '../config/env';
@@ -32,7 +29,7 @@ import type {
   PaymentMethod,
 } from '@saas-pix/shared';
 
-// ─── Caches ──────────────────────────────────────────────────────────────────
+// ─── Caches ───────────────────────────────────────────────────────────────────
 
 interface ProductCache {
   products: ProductDTO[];
@@ -72,7 +69,7 @@ export function invalidateBotConfigCache(telegramId?: string): void {
   }
 }
 
-// ─── Tipos ───────────────────────────────────────────────────────────────────
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 
 export interface OrderSummary {
   id: string;
@@ -86,11 +83,11 @@ export interface OrderSummary {
 }
 
 export interface ReferralInfo {
-  /** Total de pessoas que usaram o link (se a API retornar) */
+  /** Total de pessoas que usaram o link */
   referralCount: number;
-  /** Total de pessoas que usaram o link e finalizaram uma compra */
-  purchaseCount?: number;
-  /** Valor total de bônus já acumulado */
+  /** Total de indicados que compraram (rewardPaid = true) */
+  purchaseCount: number;
+  /** Valor total de bônus acumulado */
   bonusEarned: number;
   referralCode: string;
 }
@@ -102,24 +99,17 @@ class ApiHttpError extends Error {
   }
 }
 
-// ─── ApiClient ───────────────────────────────────────────────────────────────
+// ─── ApiClient ────────────────────────────────────────────────────────────────
 
 const BASE_HEADERS = (secret: string | undefined) => ({
   'Content-Type': 'application/json',
   'x-bot-secret': secret,
 });
 
-// AUDIT #18: agente HTTPS com keep-alive — reutiliza conexões TCP entre requests,
-// reduzindo overhead de handshake em requisições frequentes ao serviço da API.
-const keepAliveAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 50,
-});
+const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
 class ApiClient {
-  /** Cliente para leituras rápidas: 8s */
   private client: AxiosInstance;
-  /** Cliente para operações lentas (Neon cold start + MP): 25s */
   private slowClient: AxiosInstance;
 
   constructor() {
@@ -128,43 +118,29 @@ class ApiClient {
       headers: BASE_HEADERS(env.TELEGRAM_BOT_SECRET),
       httpsAgent: keepAliveAgent,
     };
-
-    this.client = axios.create({ ...baseConfig, timeout: 8_000 });
+    this.client     = axios.create({ ...baseConfig, timeout: 8_000 });
     this.slowClient = axios.create({ ...baseConfig, timeout: 25_000 });
 
     const errorInterceptor = (error: unknown) => {
       const axiosErr = error as AxiosError<{ error?: string }>;
-      const msg = axiosErr.response?.data?.error || (error instanceof Error ? error.message : 'Erro desconhecido');
+      const msg    = axiosErr.response?.data?.error || (error instanceof Error ? error.message : 'Erro desconhecido');
       const status = axiosErr.response?.status ?? 0;
       throw new ApiHttpError(msg, status);
     };
-
     this.client.interceptors.response.use((r) => r, errorInterceptor);
     this.slowClient.interceptors.response.use((r) => r, errorInterceptor);
   }
 
-  /** Retry para leituras rápidas (300ms delay) */
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (this.isRetryable(err)) {
-        await new Promise((r) => setTimeout(r, 300));
-        return await fn();
-      }
+    try { return await fn(); } catch (err) {
+      if (this.isRetryable(err)) { await new Promise((r) => setTimeout(r, 300)); return await fn(); }
       throw err;
     }
   }
 
-  /** Retry para operações lentas (800ms delay, mais tempo para recuperar) */
   private async withRetrySlowClient<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (this.isRetryable(err)) {
-        await new Promise((r) => setTimeout(r, 800));
-        return await fn();
-      }
+    try { return await fn(); } catch (err) {
+      if (this.isRetryable(err)) { await new Promise((r) => setTimeout(r, 800)); return await fn(); }
       throw err;
     }
   }
@@ -179,7 +155,7 @@ class ApiClient {
     );
   }
 
-  // ─── Métodos de leitura (timeout 8s) ──────────────────────────────────────
+  // ─── Leitura (8s) ────────────────────────────────────────────────────────────
 
   async getBotConfig(
     telegramId?: string
@@ -269,7 +245,7 @@ class ApiClient {
     return data.data ?? { referralCount: 0, purchaseCount: 0, bonusEarned: 0, referralCode: telegramId };
   }
 
-  // ─── Operações lentas (timeout 25s) ───────────────────────────────────────
+  // ─── Operações lentas (25s) ───────────────────────────────────────────────────
 
   async createPayment(params: {
     telegramId: string;
@@ -282,11 +258,8 @@ class ApiClient {
     referralCode?: string;
   }): Promise<CreatePaymentResponse> {
     invalidateBalanceCache(params.telegramId);
-
-    // AUDIT #2: Idempotency-Key determinística por userId + productId + janela de 2min.
-    const window2min = Math.floor(Date.now() / 120_000);
+    const window2min     = Math.floor(Date.now() / 120_000);
     const idempotencyKey = `create-${params.telegramId}-${params.productId}-${window2min}`;
-
     try {
       const { data } = await this.withRetrySlowClient(() =>
         this.slowClient.post<ApiResponse<CreatePaymentResponse>>('/api/payments/create', params, {
@@ -295,7 +268,6 @@ class ApiClient {
       );
       return data.data!;
     } catch (err) {
-      // AUDIT #12: fallback B17 filtra por productId
       if (
         err instanceof ApiHttpError &&
         err.statusCode === 400 &&
@@ -303,9 +275,9 @@ class ApiClient {
         params.paymentMethod === 'BALANCE'
       ) {
         try {
-          const orders = await this.getOrders(params.telegramId);
+          const orders         = await this.getOrders(params.telegramId);
           const sixtySecondsAgo = Date.now() - 60_000;
-          const recentByTime = orders.find(
+          const recentByTime   = orders.find(
             (o) =>
               (!o.productId || o.productId === params.productId) &&
               (o.status === 'DELIVERED' || o.status === 'PROCESSING') &&
@@ -313,19 +285,17 @@ class ApiClient {
           );
           if (recentByTime) {
             return {
-              paymentId: recentByTime.id,
-              pixQrCode: '',
-              pixQrCodeText: '',
-              amount: Number(recentByTime.amount ?? 0),
-              balanceUsed: Number(recentByTime.amount ?? 0),
-              expiresAt: new Date().toISOString(),
-              productName: recentByTime.productName,
+              paymentId:      recentByTime.id,
+              pixQrCode:      '',
+              pixQrCodeText:  '',
+              amount:         Number(recentByTime.amount ?? 0),
+              balanceUsed:    Number(recentByTime.amount ?? 0),
+              expiresAt:      new Date().toISOString(),
+              productName:    recentByTime.productName,
               paidWithBalance: true,
             };
           }
-        } catch {
-          // fallback falhou — deixa o erro original subir
-        }
+        } catch { /* fallback falhou — deixa o erro original subir */ }
       }
       throw err;
     }
@@ -340,10 +310,7 @@ class ApiClient {
     invalidateBalanceCache(telegramId);
     const { data } = await this.withRetrySlowClient(() =>
       this.slowClient.post<ApiResponse<CreateDepositResponse>>('/api/payments/deposit', {
-        telegramId,
-        amount,
-        firstName,
-        username,
+        telegramId, amount, firstName, username,
       })
     );
     return data.data!;

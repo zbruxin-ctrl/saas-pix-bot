@@ -13,7 +13,6 @@ const registerSchema = z.object({
 });
 
 // POST /api/referrals/register
-// Registra que um usuário chegou via link de indicação de outro.
 referralsRouter.post(
   '/register',
   requireBotSecret,
@@ -28,7 +27,6 @@ referralsRouter.post(
     const result = await registerReferral(referrerTelegramId, referredTelegramId);
 
     if (!result.registered) {
-      // Não é um erro crítico — retorna 200 mas informa o motivo
       res.json({ success: false, reason: result.reason });
       return;
     }
@@ -37,58 +35,58 @@ referralsRouter.post(
   }
 );
 
-// GET /api/referrals/stats?telegramId=xxx
-// Retorna quantos usuários o telegramId indicou e quanto já ganhou.
-referralsRouter.get(
-  '/stats',
-  requireBotSecret,
-  async (req: Request, res: Response) => {
-    const { telegramId } = req.query as { telegramId?: string };
+// GET /api/referrals/info?telegramId=xxx  (chamado pelo bot)
+// GET /api/referrals/stats?telegramId=xxx (alias — mantém compatibilidade)
+// Retorna: referralCount, purchaseCount, bonusEarned, referralCode
+async function getReferralStats(req: Request, res: Response): Promise<void> {
+  const { telegramId } = req.query as { telegramId?: string };
 
-    if (!telegramId) {
-      res.status(400).json({ success: false, error: 'telegramId é obrigatório' });
-      return;
-    }
+  if (!telegramId) {
+    res.status(400).json({ success: false, error: 'telegramId é obrigatório' });
+    return;
+  }
 
-    const user = await prisma.telegramUser.findUnique({
-      where: { telegramId },
-      select: { id: true },
-    });
+  const user = await prisma.telegramUser.findUnique({
+    where: { telegramId },
+    select: { id: true },
+  });
 
-    if (!user) {
-      res.json({ success: true, data: { totalReferred: 0, totalEarned: 0, referrals: [] } });
-      return;
-    }
-
-    const referrals = await prisma.referral.findMany({
-      where: { referrerId: user.id },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        rewardPaid: true,
-        rewardAmount: true,
-        createdAt: true,
-        referred: { select: { firstName: true, username: true } },
-      },
-    });
-
-    const totalEarned = referrals
-      .filter((r) => r.rewardPaid)
-      .reduce((sum, r) => sum + Number(r.rewardAmount), 0);
-
+  if (!user) {
     res.json({
       success: true,
-      data: {
-        totalReferred: referrals.length,
-        totalEarned: parseFloat(totalEarned.toFixed(2)),
-        referrals: referrals.map((r) => ({
-          id: r.id,
-          name: r.referred.firstName ?? r.referred.username ?? 'Usuário',
-          rewardPaid: r.rewardPaid,
-          rewardAmount: Number(r.rewardAmount),
-          createdAt: r.createdAt.toISOString(),
-        })),
-      },
+      data: { referralCount: 0, purchaseCount: 0, bonusEarned: 0, referralCode: telegramId },
     });
+    return;
   }
-);
+
+  const referrals = await prisma.referral.findMany({
+    where: { referrerId: user.id },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      rewardPaid: true,
+      rewardAmount: true,
+      createdAt: true,
+      referred: { select: { firstName: true, username: true } },
+    },
+  });
+
+  // purchaseCount = indicados que tiveram recompensa paga (fizeram ao menos 1 compra)
+  const purchaseCount = referrals.filter((r) => r.rewardPaid).length;
+  const bonusEarned = referrals
+    .filter((r) => r.rewardPaid)
+    .reduce((sum, r) => sum + Number(r.rewardAmount), 0);
+
+  res.json({
+    success: true,
+    data: {
+      referralCount: referrals.length,
+      purchaseCount,
+      bonusEarned: parseFloat(bonusEarned.toFixed(2)),
+      referralCode: telegramId,
+    },
+  });
+}
+
+referralsRouter.get('/info',  requireBotSecret, getReferralStats);
+referralsRouter.get('/stats', requireBotSecret, getReferralStats);
