@@ -1,12 +1,13 @@
 // ALTERAÇÕES: exibe stockItem.content (conteúdo entregue), deliveryMedias,
 // cancelledAt, isBlocked do usuário, medias do pedido
 // + botão "Forçar Aprovação" para pagamentos PENDING com ID no MP
+// + botão "Cancelar PIX" para pagamentos PENDING
 // + exibe paymentMethod (BALANCE | PIX | MIXED) com badge colorido
 'use client';
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { getPayment, reprocessPayment } from '@/lib/api';
+import { getPayment, reprocessPayment, cancelPayment } from '@/lib/api';
 import StatusBadge from '@/components/admin/StatusBadge';
 import { formatCurrency, formatDate } from '@/lib/utils';
 
@@ -93,6 +94,10 @@ export default function PaymentDetailPage() {
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessResult, setReprocessResult] = useState<string | null>(null);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelResult, setCancelResult] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   useEffect(() => {
     getPayment(id)
@@ -125,6 +130,31 @@ export default function PaymentDetailPage() {
       );
     } finally {
       setReprocessing(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (!payment || !confirmCancel) return;
+    setCancelling(true);
+    setCancelResult(null);
+    setCancelError(null);
+    try {
+      const result = await cancelPayment(payment.id);
+      if (result.success) {
+        setCancelResult(result.message || 'Pagamento cancelado com sucesso!');
+        setConfirmCancel(false);
+        setTimeout(() => {
+          getPayment(id).then(setPayment as any).catch(() => {});
+        }, 1000);
+      } else {
+        setCancelError(result.error || 'Erro ao cancelar pagamento.');
+      }
+    } catch (err: any) {
+      setCancelError(
+        err?.response?.data?.error || 'Erro de conexão ao tentar cancelar.'
+      );
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -163,21 +193,57 @@ export default function PaymentDetailPage() {
           <h1 className="text-2xl font-bold text-gray-900">Detalhes do Pagamento</h1>
         </div>
 
-        {isPending && hasMpId && (
-          <button
-            onClick={handleReprocess}
-            disabled={reprocessing}
-            className="flex items-center gap-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-sm font-medium px-4 py-2 transition-colors"
-          >
-            {reprocessing ? (
-              <>
-                <span className="animate-spin inline-block h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                Verificando no MP...
-              </>
-            ) : (
-              '🔄 Forçar Aprovação'
+        {isPending && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {hasMpId && (
+              <button
+                onClick={handleReprocess}
+                disabled={reprocessing || cancelling}
+                className="flex items-center gap-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-sm font-medium px-4 py-2 transition-colors"
+              >
+                {reprocessing ? (
+                  <>
+                    <span className="animate-spin inline-block h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                    Verificando no MP...
+                  </>
+                ) : (
+                  '🔄 Forçar Aprovação'
+                )}
+              </button>
             )}
-          </button>
+
+            {!confirmCancel ? (
+              <button
+                onClick={() => setConfirmCancel(true)}
+                disabled={reprocessing || cancelling}
+                className="flex items-center gap-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-sm font-medium px-4 py-2 transition-colors"
+              >
+                🚫 Cancelar PIX
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-red-700 font-medium">Confirmar cancelamento?</span>
+                <button
+                  onClick={handleCancel}
+                  disabled={cancelling}
+                  className="flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-sm font-medium px-3 py-2 transition-colors"
+                >
+                  {cancelling ? (
+                    <span className="animate-spin inline-block h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                  ) : (
+                    'Sim, cancelar'
+                  )}
+                </button>
+                <button
+                  onClick={() => setConfirmCancel(false)}
+                  disabled={cancelling}
+                  className="rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-3 py-2 transition-colors"
+                >
+                  Não
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -189,6 +255,16 @@ export default function PaymentDetailPage() {
       {reprocessError && (
         <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
           ❌ {reprocessError}
+        </div>
+      )}
+      {cancelResult && (
+        <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800 font-medium">
+          ✅ {cancelResult}
+        </div>
+      )}
+      {cancelError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
+          ❌ {cancelError}
         </div>
       )}
 

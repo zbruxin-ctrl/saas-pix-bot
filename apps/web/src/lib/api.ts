@@ -205,6 +205,13 @@ export async function reprocessPayment(
   return res.data;
 }
 
+export async function cancelPayment(
+  id: string
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const res = await api.post(`/admin/payments/${id}/cancel`);
+  return res.data;
+}
+
 // ─── CSV exports ────────────────────────────────────────────────────────────────────
 
 export function getPaymentsExportUrl(params?: {

@@ -1,6 +1,7 @@
 // routes/admin/payments.ts
 // FEAT #4: preset de período (?preset=today|7d|month) no filtro de pagamentos
 // FEAT: GET /export/csv — exporta pagamentos aprovados em CSV
+// FEAT: POST /:id/cancel — cancela pagamento PENDING no MP e no banco
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
@@ -279,5 +280,49 @@ adminPaymentsRouter.post(
     }
 
     res.json({ success: true, message: 'Pagamento reprocessado com sucesso. O bot enviará o produto ao usuário.' });
+  }
+);
+
+// POST /api/admin/payments/:id/cancel
+adminPaymentsRouter.post(
+  '/:id/cancel',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const paymentId = req.params.id;
+
+    const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+
+    if (!payment) {
+      res.status(404).json({ success: false, error: 'Pagamento não encontrado' });
+      return;
+    }
+
+    if (payment.status !== 'PENDING') {
+      res.status(400).json({
+        success: false,
+        error: `Não é possível cancelar um pagamento com status "${payment.status}". Apenas pagamentos PENDING podem ser cancelados.`,
+      });
+      return;
+    }
+
+    // Tenta cancelar no Mercado Pago se houver ID externo
+    if (payment.mercadoPagoId) {
+      try {
+        await mercadoPagoService.cancelPayment(payment.mercadoPagoId);
+      } catch (err: any) {
+        // Não bloqueia o cancelamento local se o MP falhar (pode já ter expirado)
+        console.warn(`[cancel] Falha ao cancelar no MP (${payment.mercadoPagoId}):`, err?.message);
+      }
+    }
+
+    await prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date(),
+      },
+    });
+
+    res.json({ success: true, message: 'Pagamento cancelado com sucesso.' });
   }
 );
