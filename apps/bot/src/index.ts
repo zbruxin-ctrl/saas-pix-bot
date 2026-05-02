@@ -13,6 +13,7 @@
  * FEAT-REMOVE-COUPON: action remove_coupon_ limpa cupom da sessão e volta para
  *                     tela de método de pagamento sem desconto.
  * FIX-START-BUTTONS: /start com PIX pendente agora envia botões de Verificar/Cancelar.
+ * FEAT-COPYPASTE-START: exibe pix copia e cola na mensagem de PIX em andamento.
  */
 
 import { initSentry, captureError } from './config/sentry';
@@ -25,6 +26,7 @@ import { env } from './config/env';
 import { apiClient, invalidateProductCache, invalidateBotConfigCache } from './services/apiClient';
 import { getSession, saveSession } from './services/session';
 import type { UserSession } from './services/session';
+import { escapeHtml } from './utils/escape';
 import { markUpdateProcessed } from './services/locks';
 
 // Handlers
@@ -49,10 +51,10 @@ const emptySession = (): UserSession => ({ step: 'idle', lastActivityAt: Date.no
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
 initPaymentHandlers(bot);
 
-// ─── Middleware global ────────────────────────────────────────────────────────
+// ─── Middleware global ─────────────────────────────────────────────────────
 bot.use(globalMiddleware);
 
-// ─── Comandos ─────────────────────────────────────────────────────────────────
+// ─── Comandos ───────────────────────────────────────────────────────────────
 bot.command('start', async (ctx) => {
   try {
     const userId = ctx.from!.id;
@@ -79,11 +81,16 @@ bot.command('start', async (ctx) => {
         }
       }
 
-      // FIX-START-BUTTONS: envia botões de Verificar/Cancelar junto com o aviso
+      // FEAT-COPYPASTE-START: inclui copia e cola se disponível na sessão
+      const copyPasteBlock = existing.pixQrCodeText
+        ? `\n\n📋 <b>Copia e Cola:</b>\n<code>${escapeHtml(existing.pixQrCodeText)}</code>`
+        : '';
+
       await ctx.reply(
         '⚠️ Você tem um <b>pagamento PIX em andamento</b>!\n\n' +
         'Use os botões abaixo para verificar ou cancelar.\n' +
-        'Ou aguarde expirar automaticamente em 30 minutos.',
+        'Ou aguarde expirar automaticamente em 30 minutos.' +
+        copyPasteBlock,
         {
           parse_mode: 'HTML',
           reply_markup: Markup.inlineKeyboard([
@@ -150,7 +157,7 @@ bot.action('show_balance', async (ctx) => {
   try { await showBalance(ctx); } catch (err) { captureError(err, { handler: 'show_balance' }); }
 });
 
-// ─── Action: Indique e Ganhe ──────────────────────────────────────────────────
+// ─── Action: Indique e Ganhe ──────────────────────────────────────────────────────
 bot.action('show_referral', async (ctx) => {
   await ctx.answerCbQuery('🎁 Carregando...').catch(() => {});
   try { await showReferralMenu(ctx); } catch (err) { captureError(err, { handler: 'show_referral' }); }
@@ -174,7 +181,7 @@ bot.action('deposit_balance', async (ctx) => {
   }
 });
 
-// ─── Cupom ───────────────────────────────────────────────────────────────────
+// ─── Cupom ─────────────────────────────────────────────────────────────────────────
 bot.action(/^coupon_input_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('🏷️ Cupom...').catch(() => {});
   try {
@@ -188,11 +195,12 @@ bot.action(/^skip_coupon_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏭️ Pulando cupom...').catch(() => {});
   try {
     const productId = ctx.match[1];
-    const session = await getSession(ctx.from!.id);
+    const userId = ctx.from!.id;
+    const session = await getSession(userId);
     delete session.pendingCoupon;
     delete session.pendingCouponDiscount;
     session.step = 'selecting_product';
-    await saveSession(ctx.from!.id, session);
+    await saveSession(userId, session);
     // Volta para tela de método de pagamento sem cupom
     const products = await apiClient.getProducts();
     const product = products.find((p) => p.id === productId);
@@ -229,7 +237,7 @@ bot.action(/^remove_coupon_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Seleção de produto ────────────────────────────────────────────────────────
+// ─── Seleção de produto ────────────────────────────────────────────────────────────
 bot.action(/^select_product_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produto...').catch(() => {});
   try {
@@ -276,7 +284,7 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Ações de pagamento ─────────────────────────────────────────────────────────
+// ─── Ações de pagamento ──────────────────────────────────────────────────────────────────
 bot.action(/^pay_pix_(.+)$/, async (ctx) => {
   await executePayment(ctx, ctx.match[1], 'PIX');
 });
@@ -301,7 +309,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   await handleCancelPayment(ctx, ctx.match[1]);
 });
 
-// ─── Mensagens de texto ───────────────────────────────────────────────────────
+// ─── Mensagens de texto ─────────────────────────────────────────────────────────────────────
 bot.on(message('text'), async (ctx) => {
   try {
     const userId = ctx.from!.id;
@@ -375,7 +383,7 @@ bot.on(message('text'), async (ctx) => {
   }
 });
 
-// ─── Servidor Express (Webhook) ──────────────────────────────────────────────────────
+// ─── Servidor Express (Webhook) ─────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 
