@@ -13,12 +13,12 @@
  * FEAT-MULTI-QTY: showQuantityScreen exportada;
  *                 stockLine no card de pagamento;
  *                 quantity no createPayment.
- * FEAT: emoji carteira no botão de saldo; botão cancelar depósito na tela PIX;
+ * FEAT: emoji 👛 carteira no botão de saldo; botão cancelar depósito na tela PIX;
  *       cupom único por usuário (markCouponUsed/hasCouponBeenUsed).
  */
 import { Context, Markup } from 'telegraf';
 import { apiClient } from '../services/apiClient';
-import { getSession, saveSession, clearSession, markCouponUsed, hasCouponBeenUsed } from '../services/session';
+import { getSession, saveSession, clearSession, markCouponUsed } from '../services/session';
 import { acquireLock, releaseLock } from '../services/locks';
 
 type ProductDTO = Awaited<ReturnType<typeof apiClient.getProducts>>[number];
@@ -252,7 +252,7 @@ export async function executePayment(
       ...(effectiveCoupon ? { couponCode: effectiveCoupon } : {}),
     } as Parameters<typeof apiClient.createPayment>[0]);
 
-    // Marca o cupom como usado por este usuário
+    // Marca o cupom como usado por este usuário (persiste além da sessão)
     if (effectiveCoupon) {
       await markCouponUsed(userId, effectiveCoupon);
     }

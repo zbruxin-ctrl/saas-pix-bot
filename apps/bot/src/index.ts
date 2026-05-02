@@ -1,16 +1,10 @@
 /**
  * Bot Telegram principal — registro de handlers e inicialização.
  *
- * Alterações recentes:
- * - Menu inicial com 5 botões: Ver Produtos, Meu Saldo, Meus Pedidos, Indicações, Ajuda
- * - Saldo: exibe histórico de transações
- * - Depositar: botão de cancelar depósito
- * - Tela PIX de compra: botão cancelar depósito
- * - Ajuda: link WhatsApp restaurado
- * - /ajuda: descrição dos comandos disponíveis
- * - Produtos: mostra quantidade em estoque ao lado do nome
- * - Pagamento com saldo: emoji 👛 (carteira)
- * - Cupom único por usuário (markCouponUsed / hasCouponBeenUsed)
+ * FIX-BUILD: remove imports inexistentes (./lib/logger, ./lib/sentry).
+ * FEAT: botão Indicações no menu; histórico de transações em Meu Saldo;
+ *       botão Cancelar no depósito; ajuda com WhatsApp + lista de comandos;
+ *       estoque ao lado dos produtos; cupom único por usuário (check local).
  */
 import { Telegraf, Markup, Context } from 'telegraf';
 import { apiClient } from './services/apiClient';
@@ -50,9 +44,9 @@ async function showHome(ctx: any) {
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
-    [Markup.button.callback('👛 Meu Saldo', 'show_balance')],
+    [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
     [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
-    [Markup.button.callback('🤝 Indicações', 'show_referrals')],
+    [Markup.button.callback('👥 Indicações', 'show_referrals')],
     [Markup.button.callback('❓ Ajuda', 'show_help')],
   ]);
 
@@ -96,7 +90,6 @@ bot.start(async (ctx) => {
 
     session.firstName = ctx.from.first_name;
     await saveSession(userId, session);
-
     await showHome(ctx);
   } catch (err) {
     console.error('[/start] Erro:', err);
@@ -119,10 +112,10 @@ async function showProducts(ctx: any) {
     }
 
     const buttons = products.map((p: ProductDTO) => {
-      const stockLabel = p.stock != null ? ` (${p.stock} restantes)` : '';
+      const stockTag = p.stock != null ? ` [${p.stock} un.]` : '';
       return [
         Markup.button.callback(
-          `${p.name} — R$ ${Number(p.price).toFixed(2)}${stockLabel}`,
+          `${p.name} — R$ ${Number(p.price).toFixed(2)}${stockTag}`,
           `select_product_${p.id}`
         ),
       ];
@@ -159,20 +152,19 @@ async function showBalance(ctx: any) {
     const userId = ctx.from!.id;
     const data = await apiClient.getBalance(String(userId));
 
-    // Histórico de transações (até 5 últimas)
-    const txLines = (() => {
-      const txs: any[] = (data as any).transactions ?? [];
-      if (!txs.length) return '\n<i>Sem transações recentes.</i>';
-      return '\n\n<b>Últimas transações:</b>\n' + txs.slice(0, 5).map((t: any) => {
-        const sign = t.type === 'CREDIT' || t.amount > 0 ? '➕' : '➖';
-        const label = t.description ?? (t.type === 'CREDIT' ? 'Depósito' : 'Compra');
-        const val = Math.abs(Number(t.amount)).toFixed(2);
-        const date = t.createdAt ? new Date(t.createdAt).toLocaleDateString('pt-BR') : '';
-        return `${sign} R$ ${val} — ${label}${date ? ` (${date})` : ''}`;
-      }).join('\n');
-    })();
+    const txList: any[] = data.transactions ?? [];
+    let historyText = '';
+    if (txList.length > 0) {
+      const lines = txList.slice(0, 8).map((tx: any) => {
+        const sign = tx.type === 'CREDIT' || tx.amount > 0 ? '➕' : '➖';
+        const val = Math.abs(Number(tx.amount)).toFixed(2);
+        const desc = tx.description ? ` — ${tx.description}` : '';
+        return `${sign} R$ ${val}${desc}`;
+      });
+      historyText = `\n\n📋 <b>Últimas transações:</b>\n${lines.join('\n')}`;
+    }
 
-    const text = `👛 <b>Seu saldo:</b> R$ ${Number(data.balance).toFixed(2)}${txLines}`;
+    const text = `💰 <b>Seu saldo:</b> R$ ${Number(data.balance).toFixed(2)}${historyText}`;
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback('💳 Depositar', 'deposit_balance')],
       [Markup.button.callback('◀️ Voltar', 'show_home')],
@@ -204,10 +196,66 @@ bot.action('deposit_balance', async (ctx) => {
     const session = await getSession(userId);
     session.step = 'awaiting_deposit_amount';
     await saveSession(userId, session);
-    const text = `💳 <b>Depositar saldo</b>\n\nDigite o valor que deseja depositar (mínimo R$ 1,00):`;
+    await ctx.reply(
+      `💳 <b>Depositar saldo</b>\n\nDigite o valor que deseja depositar (mínimo R$ 1,00):`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancelar', 'cancel_deposit')],
+        ]).reply_markup,
+      }
+    );
+  } catch (err) {
+    console.error('[deposit_balance] erro:', err);
+  }
+});
+
+bot.action('cancel_deposit', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const userId = ctx.from!.id;
+  const session = await getSession(userId);
+  if (session.step === 'awaiting_deposit_amount') {
+    session.step = 'idle';
+    await saveSession(userId, session);
+  }
+  await showHome(ctx);
+});
+
+// ─── Indicações ───────────────────────────────────────────────────────────────
+
+async function showReferrals(ctx: any) {
+  try {
+    const userId = ctx.from!.id;
+    let referralData: any;
+    try {
+      referralData = await apiClient.getReferrals(String(userId));
+    } catch {
+      referralData = null;
+    }
+
+    const botUsername = (await bot.telegram.getMe()).username;
+    const referralLink = `https://t.me/${botUsername}?start=${userId}`;
+
+    let statsText = '';
+    if (referralData) {
+      const total = referralData.totalReferrals ?? 0;
+      const earned = referralData.totalEarned ?? 0;
+      statsText =
+        `\n\n📊 <b>Suas estatísticas:</b>\n` +
+        `👤 Indicados: <b>${total}</b>\n` +
+        `💵 Total ganho: <b>R$ ${Number(earned).toFixed(2)}</b>`;
+    }
+
+    const text =
+      `👥 <b>Programa de Indicações</b>\n\n` +
+      `Indique amigos e ganhe bônus para cada compra feita pela sua indicação!\n\n` +
+      `🔗 <b>Seu link de indicação:</b>\n` +
+      `<code>${referralLink}</code>${statsText}`;
+
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('❌ Cancelar', 'show_balance')],
+      [Markup.button.callback('◀️ Voltar', 'show_home')],
     ]);
+
     if (ctx.callbackQuery) {
       try {
         await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
@@ -216,8 +264,14 @@ bot.action('deposit_balance', async (ctx) => {
     }
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
   } catch (err) {
-    console.error('[deposit_balance] erro:', err);
+    console.error('[showReferrals] erro:', err);
+    await ctx.reply('❌ Erro ao carregar indicações.', { parse_mode: 'HTML' });
   }
+}
+
+bot.action('show_referrals', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  await showReferrals(ctx);
 });
 
 // ─── /pedidos ─────────────────────────────────────────────────────────────────
@@ -266,42 +320,12 @@ bot.action('show_orders', async (ctx) => {
   await showOrders(ctx);
 });
 
-// ─── Indicações ───────────────────────────────────────────────────────────────
-
-async function showReferrals(ctx: any) {
-  try {
-    const userId = ctx.from!.id;
-    const botInfo = await bot.telegram.getMe();
-    const link = `https://t.me/${botInfo.username}?start=${userId}`;
-    const text =
-      `🤝 <b>Programa de Indicações</b>\n\n` +
-      `Compartilhe seu link exclusivo e ganhe bônus quando alguém se cadastrar!\n\n` +
-      `🔗 <b>Seu link:</b>\n<code>${link}</code>\n\n` +
-      `<i>Toque no link para copiar e envie para seus amigos.</i>`;
-    const keyboard = Markup.inlineKeyboard([[Markup.button.callback('◀️ Voltar', 'show_home')]]);
-    if (ctx.callbackQuery) {
-      try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
-    }
-    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
-  } catch (err) {
-    console.error('[showReferrals] erro:', err);
-    await ctx.reply('❌ Erro ao carregar indicações.', { parse_mode: 'HTML' });
-  }
-}
-
-bot.command('indicacoes', showReferrals);
-
-bot.action('show_referrals', async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  await showReferrals(ctx);
-});
-
 // ─── Ajuda ────────────────────────────────────────────────────────────────────
 
 async function showHelp(ctx: any) {
   const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
-  const supportLine = phone
-    ? `\n\n📞 <b>Suporte:</b> <a href="https://wa.me/${phone}">Falar via WhatsApp</a>`
+  const whatsappLine = phone
+    ? `\n\n💬 <b>Suporte:</b> <a href="https://wa.me/${phone}">Falar no WhatsApp</a>`
     : '';
 
   const text =
@@ -310,18 +334,17 @@ async function showHelp(ctx: any) {
     `1. Escolha um produto em 🛒 <b>Ver Produtos</b>\n` +
     `2. Selecione a forma de pagamento (PIX ou Saldo)\n` +
     `3. Pague e receba seu produto automaticamente\n\n` +
-    `<b>Comandos disponíveis:</b>\n` +
+    `<b>📋 Comandos disponíveis:</b>\n` +
     `/start — Mostra o menu inicial\n` +
     `/produtos — Lista os produtos disponíveis\n` +
-    `/saldo — Exibe seu saldo e histórico\n` +
-    `/meus_pedidos — Histórico de compras\n` +
-    `/indicacoes — Seu link de indicação\n` +
-    `/ajuda — Esta mensagem de ajuda\n` +
+    `/saldo — Exibe seu saldo e transações\n` +
+    `/meus_pedidos — Histórico de pedidos\n` +
+    `/ajuda — Esta central de ajuda\n` +
     `/suporte — Contato com o suporte\n\n` +
     `<b>Problemas?</b>\n` +
     `• PIX não aprovado? Aguarde até 2 minutos e verifique novamente.\n` +
     `• Produto não entregue? Entre em contato com o suporte.` +
-    supportLine;
+    whatsappLine;
 
   const keyboard = Markup.inlineKeyboard([[Markup.button.callback('◀️ Voltar', 'show_home')]]);
   if (ctx.callbackQuery) {
@@ -453,8 +476,7 @@ bot.action('cancel_payment', async (ctx) => {
   const userId = ctx.from!.id;
   const session = await getSession(userId);
   cancelPIXTimer(userId);
-  const usedCoupons = session.usedCoupons ?? [];
-  await clearSession(userId, session.firstName, usedCoupons);
+  await clearSession(userId, session.firstName, session.usedCoupons ?? []);
   await ctx.reply('❌ Pedido cancelado. Use /produtos para começar novamente.', { parse_mode: 'HTML' });
 });
 
@@ -515,7 +537,7 @@ bot.on('text', async (ctx) => {
     if (session.step === 'awaiting_coupon' && session.pendingProductId) {
       const couponCode = text.toUpperCase();
 
-      // Verifica se o usuário já usou este cupom
+      // Verifica se o usuário já usou este cupom antes
       const alreadyUsed = await hasCouponBeenUsed(userId, couponCode);
       if (alreadyUsed) {
         await ctx.reply(
@@ -586,7 +608,7 @@ bot.on('text', async (ctx) => {
         await ctx.replyWithPhoto(
           { url: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}` },
           {
-            caption: `💳 *Depósito de R\\$ ${String(amount.toFixed(2)).replace('.', '\\.')}*\n\nEscaneie o QR ou copie o código abaixo:`,
+            caption: `💳 *Depósito de R\$ ${String(amount.toFixed(2)).replace('.', '\\.')}*\n\nEscaneie o QR ou copie o código abaixo:`,
             parse_mode: 'MarkdownV2',
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('🔄 Verificar Depósito', `check_payment_${deposit.paymentId}`)],
