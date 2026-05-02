@@ -10,6 +10,7 @@
  *            corrige deposit.paymentId (não deposit.id).
  *            corrige deposit.pixQrCodeText (não deposit.pixCopyPaste).
  *            corrige tipo dos handlers de comando: usa NarrowedContext via (ctx: any).
+ *            substitui disable_web_page_preview por link_preview_options (Telegraf v7).
  * FEAT-MULTI-QTY: select_product → showQuantityScreen; nova action set_qty_:id_:n.
  */
 import { Telegraf, Markup, Context } from 'telegraf';
@@ -274,7 +275,7 @@ bot.command('suporte', async (ctx) => {
     const msg = phone
       ? `💬 <b>Suporte:</b>\n\n<a href="https://wa.me/${phone}">Falar com suporte via WhatsApp</a>`
       : `💬 Entre em contato com o suporte pelo administrador do bot.`;
-    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    await ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
   } catch (err) {
     console.error('[showSupport] erro:', err);
   }
