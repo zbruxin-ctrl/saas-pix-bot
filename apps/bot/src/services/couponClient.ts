@@ -4,6 +4,25 @@ import axios from 'axios';
 const API_URL = process.env.API_URL!;
 const BOT_SECRET = process.env.BOT_SECRET!;
 
+// Mensagens de erro de negócio que podem ser exibidas ao usuário diretamente
+const BUSINESS_ERROR_PATTERNS = [
+  'expirado',
+  'expirada',
+  'inválido',
+  'inválida',
+  'não encontrado',
+  'já utilizado',
+  'limite',
+  'mínimo',
+  'produto',
+  'usuário',
+];
+
+function isSafeErrorMessage(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return BUSINESS_ERROR_PATTERNS.some((p) => lower.includes(p));
+}
+
 export interface CouponValidationData {
   couponId: string;
   discountType: 'PERCENT' | 'FIXED';
@@ -26,8 +45,13 @@ export async function validateCoupon(
     );
     return { valid: true, data: data.data };
   } catch (err: any) {
-    const message = err.response?.data?.error ?? 'Cupom inválido.';
-    return { valid: false, error: message };
+    const apiMessage: string = err.response?.data?.error ?? '';
+    // Só exibe a mensagem da API se for um erro de negócio reconhecível;
+    // caso contrário (401, 403, 500, etc.) usa mensagem genérica amigável.
+    const userMessage = apiMessage && isSafeErrorMessage(apiMessage)
+      ? apiMessage
+      : 'Cupom inválido ou expirado.';
+    return { valid: false, error: userMessage };
   }
 }
 
