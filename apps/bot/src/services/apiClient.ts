@@ -86,7 +86,11 @@ export interface OrderSummary {
 }
 
 export interface ReferralInfo {
+  /** Total de pessoas que usaram o link (se a API retornar) */
   referralCount: number;
+  /** Total de pessoas que usaram o link e finalizaram uma compra */
+  purchaseCount?: number;
+  /** Valor total de bônus já acumulado */
   bonusEarned: number;
   referralCode: string;
 }
@@ -262,7 +266,7 @@ class ApiClient {
         `/api/referrals/info?telegramId=${encodeURIComponent(telegramId)}`
       )
     );
-    return data.data ?? { referralCount: 0, bonusEarned: 0, referralCode: telegramId };
+    return data.data ?? { referralCount: 0, purchaseCount: 0, bonusEarned: 0, referralCode: telegramId };
   }
 
   // ─── Operações lentas (timeout 25s) ───────────────────────────────────────

@@ -293,7 +293,7 @@ bot.action('show_orders', async (ctx) => {
 async function showReferral(ctx: Context): Promise<void> {
   try {
     const userId = ctx.from!.id;
-    let referralInfo: { referralCount?: number; bonusEarned?: number } | null = null;
+    let referralInfo: { referralCount?: number; purchaseCount?: number; bonusEarned?: number } | null = null;
     try {
       referralInfo = await apiClient.getReferralInfo(String(userId));
     } catch { /* ignora se endpoint não existir */ }
@@ -303,10 +303,14 @@ async function showReferral(ctx: Context): Promise<void> {
 
     let statsText = '';
     if (referralInfo) {
+      const usaram   = referralInfo.referralCount ?? 0;
+      const compraram = referralInfo.purchaseCount ?? 0;
+      const bonus    = Number(referralInfo.bonusEarned ?? 0).toFixed(2);
       statsText =
         `\n\n📊 <b>Suas estatísticas:</b>\n` +
-        `• Indicados: <b>${referralInfo.referralCount ?? 0}</b>\n` +
-        `• Bônus acumulado: <b>R$ ${Number(referralInfo.bonusEarned ?? 0).toFixed(2)}</b>`;
+        `👆 Pessoas que usaram seu link: <b>${usaram}</b>\n` +
+        `🛒 Dessas, compraram: <b>${compraram}</b>\n` +
+        `💰 Bônus acumulado: <b>R$ ${bonus}</b>`;
     }
 
     const text =
