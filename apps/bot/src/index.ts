@@ -17,6 +17,8 @@
  * FIX-START-STALE: /start verifica status do PIX pendente na API antes de bloquear
  *                  o usuário — sessões fantasmas (geradas por falha no envio da foto)
  *                  são limpas automaticamente e o menu é exibido normalmente.
+ * FIX-COUPON-ACTION-DEDUP: skip_coupon_ e remove_coupon_ compartilham handleClearCouponAndShowPayment.
+ *                          Dead code pay_mixed_coupon_ removido.
  */
 
 import { initSentry, captureError } from './config/sentry';
@@ -54,10 +56,31 @@ const emptySession = (): UserSession => ({ step: 'idle', lastActivityAt: Date.no
 const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN);
 initPaymentHandlers(bot);
 
-// ─── Middleware global ─────────────────────────────────────────────────────
+// ─── Middleware global ────────────────────────────────────────────────────
 bot.use(globalMiddleware);
 
-// ─── Comandos ───────────────────────────────────────────────────────────────
+// ─── Helper interno: limpa cupom e volta para tela de pagamento ────────────────
+async function handleClearCouponAndShowPayment(
+  ctx: Parameters<typeof executePayment>[0],
+  productId: string
+): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = await getSession(userId);
+  delete session.pendingCoupon;
+  delete session.pendingCouponDiscount;
+  session.step = 'selecting_product';
+  await saveSession(userId, session);
+
+  const products = await apiClient.getProducts();
+  const product = products.find((p: ProductDTO) => p.id === productId);
+  if (!product) {
+    await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
+    return;
+  }
+  await showPaymentMethodScreen(ctx, product);
+}
+
+// ─── Comandos ───────────────────────────────────────────────────────────
 bot.command('start', async (ctx) => {
   try {
     const userId = ctx.from!.id;
@@ -81,13 +104,11 @@ bot.command('start', async (ctx) => {
           String(userId)
         );
         if (status !== 'PENDING') {
-          // Pagamento já resolvido (APPROVED, CANCELLED, EXPIRED) — limpa sessão
           await clearSession(userId, existing.firstName);
           await showHome(ctx);
           return;
         }
       } catch {
-        // Pagamento não encontrado na API ou erro de rede — limpa sessão fantasma
         console.warn(
           `[/start] paymentId ${existing.paymentId} não encontrado na API para userId ${userId} — limpando sessão`
         );
@@ -96,7 +117,6 @@ bot.command('start', async (ctx) => {
         return;
       }
 
-      // Pagamento realmente PENDING — re-agenda timer e exibe aviso
       if (existing.pixExpiresAt) {
         const remaining = new Date(existing.pixExpiresAt).getTime() - Date.now();
         if (remaining > 0) {
@@ -108,7 +128,6 @@ bot.command('start', async (ctx) => {
         }
       }
 
-      // FEAT-COPYPASTE-START: inclui copia e cola se disponível na sessão
       const copyPasteBlock = existing.pixQrCodeText
         ? `\n\n📋 <b>Copia e Cola:</b>\n<code>${escapeHtml(existing.pixQrCodeText)}</code>`
         : '';
@@ -184,7 +203,7 @@ bot.action('show_balance', async (ctx) => {
   try { await showBalance(ctx); } catch (err) { captureError(err, { handler: 'show_balance' }); }
 });
 
-// ─── Action: Indique e Ganhe ──────────────────────────────────────────────────────
+// ─── Action: Indique e Ganhe ────────────────────────────────────────────────────
 bot.action('show_referral', async (ctx) => {
   await ctx.answerCbQuery('🎁 Carregando...').catch(() => {});
   try { await showReferralMenu(ctx); } catch (err) { captureError(err, { handler: 'show_referral' }); }
@@ -208,7 +227,7 @@ bot.action('deposit_balance', async (ctx) => {
   }
 });
 
-// ─── Cupom ─────────────────────────────────────────────────────────────────────────
+// ─── Cupom ───────────────────────────────────────────────────────────────────────────────────
 bot.action(/^coupon_input_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('🏷️ Cupom...').catch(() => {});
   try {
@@ -218,53 +237,26 @@ bot.action(/^coupon_input_(.+)$/, async (ctx) => {
   }
 });
 
+// FIX-COUPON-ACTION-DEDUP: skip e remove são idênticos — reutilizam o mesmo helper
 bot.action(/^skip_coupon_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏭️ Pulando cupom...').catch(() => {});
   try {
-    const productId = ctx.match[1];
-    const userId = ctx.from!.id;
-    const session = await getSession(userId);
-    delete session.pendingCoupon;
-    delete session.pendingCouponDiscount;
-    session.step = 'selecting_product';
-    await saveSession(userId, session);
-    // Volta para tela de método de pagamento sem cupom
-    const products = await apiClient.getProducts();
-    const product = products.find((p) => p.id === productId);
-    if (!product) {
-      await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
-      return;
-    }
-    await showPaymentMethodScreen(ctx, product);
+    await handleClearCouponAndShowPayment(ctx, ctx.match[1]);
   } catch (err) {
     captureError(err, { handler: 'skip_coupon' });
   }
 });
 
-// FEAT-REMOVE-COUPON: remove cupom aplicado e volta para tela de método sem desconto
 bot.action(/^remove_coupon_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('🗑️ Cupom removido!').catch(() => {});
   try {
-    const productId = ctx.match[1];
-    const userId = ctx.from!.id;
-    const session = await getSession(userId);
-    delete session.pendingCoupon;
-    delete session.pendingCouponDiscount;
-    session.step = 'selecting_product';
-    await saveSession(userId, session);
-    const products = await apiClient.getProducts();
-    const product = products.find((p) => p.id === productId);
-    if (!product) {
-      await ctx.reply('❌ Produto não encontrado.', { parse_mode: 'HTML' });
-      return;
-    }
-    await showPaymentMethodScreen(ctx, product);
+    await handleClearCouponAndShowPayment(ctx, ctx.match[1]);
   } catch (err) {
     captureError(err, { handler: 'remove_coupon' });
   }
 });
 
-// ─── Seleção de produto ────────────────────────────────────────────────────────────
+// ─── Seleção de produto ─────────────────────────────────────────────────────────────────
 bot.action(/^select_product_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ Carregando produto...').catch(() => {});
   try {
@@ -311,7 +303,7 @@ bot.action(/^select_product_(.+)$/, async (ctx) => {
   }
 });
 
-// ─── Ações de pagamento ──────────────────────────────────────────────────────────────────
+// ─── Ações de pagamento ──────────────────────────────────────────────────────────────────────────────────────
 bot.action(/^pay_pix_(.+)$/, async (ctx) => {
   await executePayment(ctx, ctx.match[1], 'PIX');
 });
@@ -324,10 +316,6 @@ bot.action(/^pay_mixed_(.+)$/, async (ctx) => {
   await executePayment(ctx, ctx.match[1], 'MIXED');
 });
 
-bot.action(/^pay_mixed_coupon_(.+)$/, async (ctx) => {
-  await executePayment(ctx, ctx.match[1], 'MIXED');
-});
-
 bot.action(/^check_payment_(.+)$/, async (ctx) => {
   await handleCheckPayment(ctx, ctx.match[1]);
 });
@@ -336,7 +324,7 @@ bot.action(/^cancel_payment_(.+)$/, async (ctx) => {
   await handleCancelPayment(ctx, ctx.match[1]);
 });
 
-// ─── Mensagens de texto ─────────────────────────────────────────────────────────────────────
+// ─── Mensagens de texto ───────────────────────────────────────────────────────────────────────────────────────────────
 bot.on(message('text'), async (ctx) => {
   try {
     const userId = ctx.from!.id;
@@ -410,7 +398,7 @@ bot.on(message('text'), async (ctx) => {
   }
 });
 
-// ─── Servidor Express (Webhook) ─────────────────────────────────────────────────────────────────
+// ─── Servidor Express (Webhook) ─────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 
@@ -468,7 +456,7 @@ async function start() {
   try {
     await bot.telegram.setMyCommands([
       { command: 'start', description: '🏠 Menu principal' },
-      { command: 'produtos', description: '🛒 Ver produtos disponíveis' },
+      { command: 'produtos', description: '🛍️ Ver produtos disponíveis' },
       { command: 'saldo', description: '💰 Ver meu saldo' },
       { command: 'meus_pedidos', description: '📦 Ver meus pedidos' },
       { command: 'indicar', description: '🎁 Indicar amigos e ganhar bônus' },
