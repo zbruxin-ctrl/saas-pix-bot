@@ -1,7 +1,6 @@
 // routes/admin/settings.ts
 // FEAT #2 #3: Configurações do bot no painel admin + número de suporte via env var
-// As configurações são armazenadas na tabela AdminSetting (chave/valor JSON) no Neon.
-// Cada chave pode ser sobrescrita pela env var equivalente (Railway tem prioridade).
+// FEAT-REFERRAL-SETTINGS: configurações do programa de indicação
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma';
@@ -10,13 +9,17 @@ import { logger } from '../../lib/logger';
 
 export const adminSettingsRouter = Router();
 
-/** Chaves de configuração perm itidas e seus defaults */
 const SETTING_DEFAULTS: Record<string, string> = {
-  support_phone: process.env.SUPPORT_PHONE_NUMBER ?? '',
-  welcome_message: process.env.BOT_WELCOME_MESSAGE ?? 'Olhaí! Bem-vindo(a). Como posso ajudar?',
-  start_message:   process.env.BOT_START_MESSAGE   ?? 'Olhá! Bem-vindo(a) à nossa loja. Digite /produtos para ver o catálogo.',
-  maintenance_mode: 'false',
-  maintenance_message: 'Estamos em manutenção. Voltamos em breve!',
+  support_phone:           process.env.SUPPORT_PHONE_NUMBER ?? '',
+  welcome_message:         process.env.BOT_WELCOME_MESSAGE ?? 'Olhaí! Bem-vindo(a). Como posso ajudar?',
+  start_message:           process.env.BOT_START_MESSAGE   ?? 'Olhá! Bem-vindo(a) à nossa loja. Digite /produtos para ver o catálogo.',
+  maintenance_mode:        'false',
+  maintenance_message:     'Estamos em manutenção. Voltamos em breve!',
+  referral_enabled:        'true',
+  referral_reward_amount:  '5.00',
+  referral_min_purchase:   '0.00',
+  referral_max_per_user:   '0',
+  referral_reward_message: 'Você ganhou R$ {amount} por indicar {name}! 🎉',
 };
 
 const ALLOWED_KEYS = Object.keys(SETTING_DEFAULTS);
@@ -31,14 +34,7 @@ const settingsUpdateSchema = z.object({
   ),
 });
 
-/**
- * Busca uma configuração pelo nome. Prioridade:
- * 1. Variável de ambiente (Railway tem controle total)
- * 2. Banco de dados (painel admin)
- * 3. Default hardcoded
- */
 export async function getSetting(key: string): Promise<string> {
-  // Mapa de env vars que sobrepõem cada chave
   const envOverrides: Record<string, string | undefined> = {
     support_phone:       process.env.SUPPORT_PHONE_NUMBER,
     welcome_message:     process.env.BOT_WELCOME_MESSAGE,
@@ -67,12 +63,9 @@ adminSettingsRouter.get(
     try {
       const rows = await prisma.adminSetting.findMany().catch(() => []);
       const dbMap = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-
-      // Mescla defaults + banco, retorna apenas chaves permitidas
       const result = Object.fromEntries(
         ALLOWED_KEYS.map((k) => [k, dbMap[k] ?? SETTING_DEFAULTS[k]])
       );
-
       res.json({ success: true, data: result });
     } catch (err) {
       logger.error('[settings] Erro ao buscar configurações:', err);
@@ -88,18 +81,15 @@ adminSettingsRouter.put(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const { settings } = settingsUpdateSchema.parse(req.body);
-
-      // Upsert atômico de cada chave no Neon
       await prisma.$transaction(
         Object.entries(settings).map(([key, value]) =>
           prisma.adminSetting.upsert({
-            where: { key },
+            where:  { key },
             update: { value },
             create: { key, value },
           })
         )
       );
-
       logger.info(`[settings] ${Object.keys(settings).length} configurações atualizadas por admin=${req.admin?.id}`);
       res.json({ success: true, message: 'Configurações salvas com sucesso' });
     } catch (err) {
