@@ -32,6 +32,7 @@ import {
   showPaymentMethodScreen,
   schedulePIXExpiry,
 } from './handlers/payments';
+import { handleReferral, processReferralStart } from './handlers/referral';
 
 import type { ProductDTO } from '@saas-pix/shared';
 
@@ -48,6 +49,14 @@ bot.command('start', async (ctx) => {
   try {
     const userId = ctx.from!.id;
     const existing = await getSession(userId).catch(emptySession);
+
+    // Processar deep-link de indicação: /start ref_TELEGRAMID
+    const payload = (ctx.message as { text?: string }).text?.split(' ')[1] ?? '';
+    if (payload.startsWith('ref_')) {
+      await processReferralStart(ctx, payload).catch((err) =>
+        captureError(err, { handler: 'processReferralStart' })
+      );
+    }
 
     if (existing.step === 'awaiting_payment' && existing.paymentId) {
       // FIX #1: re-agenda o timer de expiração usando o tempo restante do Redis
@@ -95,6 +104,9 @@ bot.command('ajuda', async (ctx) => {
 });
 bot.command('meus_pedidos', async (ctx) => {
   try { await showOrders(ctx); } catch (err) { captureError(err, { handler: 'meus_pedidos' }); }
+});
+bot.command('indicar', async (ctx) => {
+  try { await handleReferral(ctx); } catch (err) { captureError(err, { handler: 'indicar' }); }
 });
 
 // ─── Actions de navegação ─────────────────────────────────────────────────────
@@ -289,6 +301,7 @@ async function start() {
       { command: 'produtos', description: '🛒 Ver produtos disponíveis' },
       { command: 'saldo', description: '💰 Ver meu saldo' },
       { command: 'meus_pedidos', description: '📦 Ver meus pedidos' },
+      { command: 'indicar', description: '🎁 Indicar amigos e ganhar bônus' },
       { command: 'ajuda', description: '❓ Ajuda e suporte' },
     ]);
     console.log('✅ Menu de comandos registrado no Telegram');
