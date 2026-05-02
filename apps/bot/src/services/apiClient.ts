@@ -7,7 +7,7 @@
 // FEATURE: getOrders(telegramId)
 // FEATURE: getReferralInfo(telegramId) — chama /api/referrals/info
 // FIX-B17: createPayment distingue erro real de idempotencia
-// FEAT-MAINT: getBotConfig() busca maintenance_mode + maintenance_message
+// FEAT-MAINT: getBotConfig() busca maintenance_mode + maintenance_message + isBlocked
 //   com cache em memoria TTL 30s
 // FEAT-BLOCKED: getBotConfig(telegramId) tambem retorna isBlocked do usuario
 // SEC FIX #6: getPaymentStatus e cancelPayment agora enviam telegramId
@@ -18,6 +18,7 @@
 // AUDIT #12: fallback B17 filtra por productId
 // AUDIT #18: Axios com httpsAgent keepAlive:true
 // FEAT-SUPPORT: getBotConfig inclui supportPhone lido do painel admin
+// FIX-WELCOME: getBotConfig inclui welcomeMessage lido do painel admin
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import https from 'https';
 import { env } from '../config/env';
@@ -55,7 +56,13 @@ export function invalidateBalanceCache(telegramId: string): void {
 }
 
 interface BotConfigCache {
-  data: { maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean };
+  data: {
+    maintenanceMode: boolean;
+    maintenanceMessage: string;
+    supportPhone: string;
+    isBlocked: boolean;
+    welcomeMessage: string;
+  };
   expiresAt: number;
 }
 const botConfigCache = new Map<string, BotConfigCache>();
@@ -160,7 +167,13 @@ class ApiClient {
 
   async getBotConfig(
     telegramId?: string
-  ): Promise<{ maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean }> {
+  ): Promise<{
+    maintenanceMode: boolean;
+    maintenanceMessage: string;
+    supportPhone: string;
+    isBlocked: boolean;
+    welcomeMessage: string;
+  }> {
     const cacheKey = telegramId ?? '__global__';
     const now = Date.now();
     const cached = botConfigCache.get(cacheKey);
@@ -168,15 +181,31 @@ class ApiClient {
     try {
       const qs = telegramId ? `?telegramId=${encodeURIComponent(telegramId)}` : '';
       const { data } = await this.withRetry(() =>
-        this.client.get<ApiResponse<{ maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean }>>(
-          `/api/payments/bot-config${qs}`
-        )
+        this.client.get<ApiResponse<{
+          maintenanceMode: boolean;
+          maintenanceMessage: string;
+          supportPhone: string;
+          isBlocked: boolean;
+          welcomeMessage: string;
+        }>>(`/api/payments/bot-config${qs}`)
       );
-      const result = data.data ?? { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false };
+      const result = data.data ?? {
+        maintenanceMode: false,
+        maintenanceMessage: '',
+        supportPhone: '',
+        isBlocked: false,
+        welcomeMessage: '',
+      };
       botConfigCache.set(cacheKey, { data: result, expiresAt: now + BOT_CONFIG_CACHE_TTL });
       return result;
     } catch {
-      return { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false };
+      return {
+        maintenanceMode: false,
+        maintenanceMessage: '',
+        supportPhone: '',
+        isBlocked: false,
+        welcomeMessage: '',
+      };
     }
   }
 

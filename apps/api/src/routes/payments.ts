@@ -16,6 +16,7 @@
 // FIX-COUPON: couponCode e referralCode adicionados ao createPaymentSchema
 // FIX-ZOD: parse() envolto em try/catch para retornar 400 em vez de 500
 // FEAT-SUPPORT: /bot-config agora inclui supportPhone lido do painel admin (support_phone)
+// FIX-WELCOME: /bot-config inclui welcomeMessage lido do painel admin (welcome_message)
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -86,7 +87,7 @@ async function getPaymentIfOwner(
 // ─── Rotas estáticas PRIMEIRO ─────────────────────────────────────────────────
 
 // GET /api/payments/bot-config?telegramId=xxx
-// Retorna maintenance_mode, maintenance_message, isBlocked do usuario e supportPhone
+// Retorna maintenance_mode, maintenance_message, isBlocked, supportPhone e welcomeMessage
 paymentsRouter.get(
   '/bot-config',
   requireBotSecret,
@@ -94,10 +95,11 @@ paymentsRouter.get(
     try {
       const telegramId = req.query.telegramId as string | undefined;
 
-      const [maintenanceMode, maintenanceMessage, supportPhone, blocked] = await Promise.all([
+      const [maintenanceMode, maintenanceMessage, supportPhone, welcomeMessage, blocked] = await Promise.all([
         getSetting('maintenance_mode'),
         getSetting('maintenance_message'),
         getSetting('support_phone'),
+        getSetting('welcome_message'),
         telegramId ? isUserBlocked(telegramId) : Promise.resolve(false),
       ]);
 
@@ -108,11 +110,21 @@ paymentsRouter.get(
           maintenanceMessage,
           supportPhone,
           isBlocked: blocked,
+          welcomeMessage,
         },
       });
     } catch (err) {
       logger.error('[bot-config] Erro:', err);
-      res.json({ success: true, data: { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false } });
+      res.json({
+        success: true,
+        data: {
+          maintenanceMode: false,
+          maintenanceMessage: '',
+          supportPhone: '',
+          isBlocked: false,
+          welcomeMessage: '',
+        },
+      });
     }
   }
 );

@@ -13,6 +13,7 @@
  * FIX ITEM-8: schedulePIXExpiry agendado após geração de PIX de depósito.
  * FIX ITEM-11: saveSession desnecessário removido de select_product.
  * FEAT-SUPPORT: showHelp busca supportPhone via apiClient.getBotConfig() (painel admin).
+ * FIX-WELCOME: showHome busca welcomeMessage via apiClient.getBotConfig() (painel admin).
  */
 import { Telegraf, Markup } from 'telegraf';
 import type { Context } from 'telegraf';
@@ -54,9 +55,14 @@ async function getBotUsername(): Promise<string> {
 
 // ─── showHome ─────────────────────────────────────────────────────────────────
 
+const DEFAULT_WELCOME =
+  '🛒 Aqui você pode adquirir nossos produtos de forma rápida e segura.\n\n' +
+  '💳 Aceitamos pagamento via <b>PIX</b> (confirmação instantânea) ou via <b>saldo pré-carregado</b>.';
+
 async function showHome(ctx: Context): Promise<void> {
-  const welcomeMsg = process.env.BOT_WELCOME_MESSAGE
-    ?? `🛒 Aqui você pode adquirir nossos produtos de forma rápida e segura.\n\n💳 Aceitamos pagamento via <b>PIX</b> (confirmação instantânea) ou via <b>saldo pré-carregado</b>.`;
+  // FIX-WELCOME: lê welcome_message do painel admin; cai no padrão se vazio
+  const config = await apiClient.getBotConfig().catch(() => ({ welcomeMessage: '' }));
+  const welcomeMsg = config.welcomeMessage?.trim() || DEFAULT_WELCOME;
 
   const firstName = ctx.from?.first_name ?? 'visitante';
   const text =
