@@ -12,6 +12,7 @@
  * FIX #7: clearSession sem 3º parâmetro — session.ts lê usedCoupons da sessão atual automaticamente.
  * FIX ITEM-8: schedulePIXExpiry agendado após geração de PIX de depósito.
  * FIX ITEM-11: saveSession desnecessário removido de select_product.
+ * FEAT-SUPPORT: showHelp busca supportPhone via apiClient.getBotConfig() (painel admin).
  */
 import { Telegraf, Markup } from 'telegraf';
 import type { Context } from 'telegraf';
@@ -364,7 +365,10 @@ bot.action('show_referral', async (ctx) => {
 // ─── Ajuda ────────────────────────────────────────────────────────────────────
 
 async function showHelp(ctx: Context): Promise<void> {
-  const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
+  // Busca o telefone de suporte dinamicamente do painel admin
+  const config = await apiClient.getBotConfig().catch(() => ({ supportPhone: '' }));
+  const phone = config.supportPhone || '';
+
   const whatsappLine = phone
     ? `\n📞 <a href="https://wa.me/${phone}">Falar com suporte no WhatsApp</a>`
     : '';
@@ -421,7 +425,8 @@ bot.action('show_help', async (ctx) => {
 
 bot.command('suporte', async (ctx) => {
   try {
-    const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
+    const config = await apiClient.getBotConfig().catch(() => ({ supportPhone: '' }));
+    const phone = config.supportPhone || '';
     const msg = phone
       ? `💬 <b>Suporte:</b>\n\n<a href="https://wa.me/${phone}">Falar com suporte via WhatsApp</a>`
       : `💬 Entre em contato com o suporte pelo administrador do bot.`;

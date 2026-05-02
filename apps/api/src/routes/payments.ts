@@ -15,6 +15,7 @@
 //   verificam ownership antes de retornar/cancelar (impede consulta de pagamentos alheios)
 // FIX-COUPON: couponCode e referralCode adicionados ao createPaymentSchema
 // FIX-ZOD: parse() envolto em try/catch para retornar 400 em vez de 500
+// FEAT-SUPPORT: /bot-config agora inclui supportPhone lido do painel admin (support_phone)
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -85,7 +86,7 @@ async function getPaymentIfOwner(
 // ─── Rotas estáticas PRIMEIRO ─────────────────────────────────────────────────
 
 // GET /api/payments/bot-config?telegramId=xxx
-// Retorna maintenance_mode, maintenance_message e isBlocked do usuario
+// Retorna maintenance_mode, maintenance_message, isBlocked do usuario e supportPhone
 paymentsRouter.get(
   '/bot-config',
   requireBotSecret,
@@ -93,9 +94,10 @@ paymentsRouter.get(
     try {
       const telegramId = req.query.telegramId as string | undefined;
 
-      const [maintenanceMode, maintenanceMessage, blocked] = await Promise.all([
+      const [maintenanceMode, maintenanceMessage, supportPhone, blocked] = await Promise.all([
         getSetting('maintenance_mode'),
         getSetting('maintenance_message'),
+        getSetting('support_phone'),
         telegramId ? isUserBlocked(telegramId) : Promise.resolve(false),
       ]);
 
@@ -104,12 +106,13 @@ paymentsRouter.get(
         data: {
           maintenanceMode: maintenanceMode === 'true',
           maintenanceMessage,
+          supportPhone,
           isBlocked: blocked,
         },
       });
     } catch (err) {
       logger.error('[bot-config] Erro:', err);
-      res.json({ success: true, data: { maintenanceMode: false, maintenanceMessage: '', isBlocked: false } });
+      res.json({ success: true, data: { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false } });
     }
   }
 );

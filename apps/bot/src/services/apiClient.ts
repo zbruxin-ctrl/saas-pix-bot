@@ -17,6 +17,7 @@
 //   userId+productId evita criar pagamento duplicado em retry de timeout.
 // AUDIT #12: fallback B17 filtra por productId
 // AUDIT #18: Axios com httpsAgent keepAlive:true
+// FEAT-SUPPORT: getBotConfig inclui supportPhone lido do painel admin
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import https from 'https';
 import { env } from '../config/env';
@@ -54,7 +55,7 @@ export function invalidateBalanceCache(telegramId: string): void {
 }
 
 interface BotConfigCache {
-  data: { maintenanceMode: boolean; maintenanceMessage: string; isBlocked: boolean };
+  data: { maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean };
   expiresAt: number;
 }
 const botConfigCache = new Map<string, BotConfigCache>();
@@ -159,7 +160,7 @@ class ApiClient {
 
   async getBotConfig(
     telegramId?: string
-  ): Promise<{ maintenanceMode: boolean; maintenanceMessage: string; isBlocked: boolean }> {
+  ): Promise<{ maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean }> {
     const cacheKey = telegramId ?? '__global__';
     const now = Date.now();
     const cached = botConfigCache.get(cacheKey);
@@ -167,15 +168,15 @@ class ApiClient {
     try {
       const qs = telegramId ? `?telegramId=${encodeURIComponent(telegramId)}` : '';
       const { data } = await this.withRetry(() =>
-        this.client.get<ApiResponse<{ maintenanceMode: boolean; maintenanceMessage: string; isBlocked: boolean }>>(
+        this.client.get<ApiResponse<{ maintenanceMode: boolean; maintenanceMessage: string; supportPhone: string; isBlocked: boolean }>>(
           `/api/payments/bot-config${qs}`
         )
       );
-      const result = data.data ?? { maintenanceMode: false, maintenanceMessage: '', isBlocked: false };
+      const result = data.data ?? { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false };
       botConfigCache.set(cacheKey, { data: result, expiresAt: now + BOT_CONFIG_CACHE_TTL });
       return result;
     } catch {
-      return { maintenanceMode: false, maintenanceMessage: '', isBlocked: false };
+      return { maintenanceMode: false, maintenanceMessage: '', supportPhone: '', isBlocked: false };
     }
   }
 
