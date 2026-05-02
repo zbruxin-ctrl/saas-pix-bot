@@ -7,13 +7,16 @@
  *
  * REFACTOR: extrai buildReferralPayload() eliminando duplicação entre
  *   showReferralMenu (callback) e handleReferral (comando /indicar).
+ *
+ * FIX-HANDLEREFERRAL-DEDUP: handleReferral reutiliza buildReferralButtons()
+ *   em vez de duplicar shareUrl e teclado inline localmente.
  */
 import { Context, Markup } from 'telegraf';
 import { editOrReply } from '../utils/helpers';
 import { registerReferral, getReferralStats } from '../services/referralClient';
 import { env } from '../config/env';
 
-// ─── Helpers internos ────────────────────────────────────────────────────────
+// ─── Helpers internos ───────────────────────────────────────────────────────────────────────────────
 
 function getRefLink(telegramId: string): string {
   const username = env.BOT_USERNAME;
@@ -68,7 +71,7 @@ function buildReferralButtons(refLink: string) {
   ];
 }
 
-// ─── Menu inline de Indicação (callback show_referral) ──────────────────────
+// ─── Menu inline de Indicação (callback show_referral) ──────────────────────────────────────────
 
 export async function showReferralMenu(ctx: Context): Promise<void> {
   const telegramId = String(ctx.from?.id);
@@ -83,7 +86,7 @@ export async function showReferralMenu(ctx: Context): Promise<void> {
   });
 }
 
-// ─── Comando /indicar (mensagem nova, sem edição) ────────────────────────────
+// ─── Comando /indicar (mensagem nova, sem edição) ────────────────────────────────────────────────
 
 export async function handleReferral(ctx: Context): Promise<void> {
   const telegramId = String(ctx.from?.id);
@@ -91,17 +94,20 @@ export async function handleReferral(ctx: Context): Promise<void> {
 
   const refLink = getRefLink(telegramId);
   const stats = await fetchStats(telegramId);
-  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent('Use meu link e ganhe desconto!')}`;
+
+  // FIX-HANDLEREFERRAL-DEDUP: reutiliza buildReferralButtons() em vez de
+  // duplicar shareUrl e teclado inline. O botão "Voltar ao Menu" é omitido
+  // aqui pois /indicar é um comando que abre nova mensagem (não há contexto
+  // de menu a voltar), então usa apenas o primeiro botão do array.
+  const [shareButton] = buildReferralButtons(refLink);
 
   await ctx.reply(buildReferralText(refLink, stats), {
     parse_mode: 'HTML',
-    reply_markup: Markup.inlineKeyboard([
-      [Markup.button.url('📤 Compartilhar', shareUrl)],
-    ]).reply_markup,
+    reply_markup: Markup.inlineKeyboard([shareButton]).reply_markup,
   });
 }
 
-// ─── Processa deep link ref_XXX no /start ───────────────────────────────────
+// ─── Processa deep link ref_XXX no /start ───────────────────────────────────────────────────
 
 export async function processReferralStart(
   ctx: Context,
