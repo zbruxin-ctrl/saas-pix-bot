@@ -23,6 +23,7 @@
  * FEAT-REMOVE-COUPON: botão 🗑️ Remover cupom na tela de método de pagamento.
  * FEAT-COPYPASTE-CHECK: salva pixQrCodeText na sessão e reenvia copia e cola
  *                       quando usuário clica em Verificar Pagamento e status é PENDING.
+ * FIX-502: mensagem amigável quando API retorna 502 (servidor inicializando).
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -243,7 +244,7 @@ export async function executePayment(
     // FIX-MDV2: '!' é reservado no MarkdownV2 — escapado manualmente no literal
     // e via escapeMd() em todos os valores dinâmicos.
     const caption =
-      `💳 *Pagamento PIX Gerado\!*\n\n` +
+      `💳 *Pagamento PIX Gerado\\!*\n\n` +
       `📦 *Produto:* ${escapeMd(payment.productName)}\n` +
       `💰 *Valor total:* R$ ${escapeMd(Number(payment.amount).toFixed(2))}${mixedLine}${discountMdLine}\n` +
       `⏰ *Válido até:* ${escapeMd(expiresStr)}\n` +
@@ -284,6 +285,21 @@ export async function executePayment(
 
     if (errStatus === 403 || errMsg.toLowerCase().includes('suspensa')) {
       await showBlockedMessage(ctx);
+      return;
+    }
+
+    if (errStatus === 502) {
+      await editOrReply(
+        ctx,
+        `🛠️ <b>O servidor está inicializando</b>\n\nAguarde alguns segundos e tente novamente. 😊`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Tentar Novamente', `select_product_${productId}`)],
+            [Markup.button.callback('◀️ Voltar', 'show_products')],
+          ]).reply_markup,
+        }
+      );
       return;
     }
 
