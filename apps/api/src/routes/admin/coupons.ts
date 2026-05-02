@@ -7,6 +7,9 @@
 // GET  /admin/coupons/volume-tiers — lista tiers de volume
 // POST /admin/coupons/volume-tiers — cria tier de volume
 // DELETE /admin/coupons/volume-tiers/:id — remove tier
+// FIX L24: _count.uses → _count.couponUses (nome correto da relação no schema)
+// FIX L52: removido campo `description` (não existe no model Coupon)
+// FIX L139: removido campo `label` (não existe no model VolumeTier)
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
@@ -21,7 +24,8 @@ adminCouponsRouter.use(requireRole('ADMIN', 'SUPERADMIN'));
 adminCouponsRouter.get('/', async (_req: AuthenticatedRequest, res: Response) => {
   const coupons = await prisma.coupon.findMany({
     orderBy: { createdAt: 'desc' },
-    include: { _count: { select: { uses: true } } },
+    // FIX: relação se chama couponUses no schema, não uses
+    include: { _count: { select: { couponUses: true } } },
   });
   res.json({ success: true, data: coupons });
 });
@@ -29,7 +33,7 @@ adminCouponsRouter.get('/', async (_req: AuthenticatedRequest, res: Response) =>
 adminCouponsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   const {
     code,
-    description,
+    // FIX: description removido — campo não existe no model Coupon
     discountType = 'PERCENT',
     discountValue,
     minOrderValue,
@@ -49,7 +53,6 @@ adminCouponsRouter.post('/', async (req: AuthenticatedRequest, res: Response) =>
   const coupon = await prisma.coupon.create({
     data: {
       code: String(code).toUpperCase().trim(),
-      description: description ?? null,
       discountType,
       discountValue: Number(discountValue),
       minOrderValue: minOrderValue != null ? Number(minOrderValue) : null,
@@ -67,7 +70,7 @@ adminCouponsRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) 
   const { id } = req.params;
   const {
     code,
-    description,
+    // FIX: description removido — campo não existe no model Coupon
     discountType,
     discountValue,
     minOrderValue,
@@ -84,7 +87,6 @@ adminCouponsRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) 
     where: { id },
     data: {
       ...(code !== undefined && { code: String(code).toUpperCase().trim() }),
-      ...(description !== undefined && { description }),
       ...(discountType !== undefined && { discountType }),
       ...(discountValue !== undefined && { discountValue: Number(discountValue) }),
       ...(minOrderValue !== undefined && { minOrderValue: minOrderValue !== null ? Number(minOrderValue) : null }),
@@ -121,7 +123,8 @@ adminCouponsRouter.get('/volume-tiers', async (_req: AuthenticatedRequest, res: 
 });
 
 adminCouponsRouter.post('/volume-tiers', async (req: AuthenticatedRequest, res: Response) => {
-  const { productId, minQty, discountPercent, label } = req.body;
+  const { productId, minQty, discountPercent } = req.body;
+  // FIX: label removido — campo não existe no model VolumeTier
 
   if (minQty === undefined || discountPercent === undefined) {
     throw new AppError('minQty e discountPercent são obrigatórios.', 400);
@@ -136,7 +139,6 @@ adminCouponsRouter.post('/volume-tiers', async (req: AuthenticatedRequest, res: 
       productId: productId ?? null,
       minQty: Number(minQty),
       discountPercent: Number(discountPercent),
-      label: label ?? null,
     },
   });
   res.status(201).json({ success: true, data: tier });
