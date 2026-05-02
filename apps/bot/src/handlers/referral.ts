@@ -1,7 +1,7 @@
 // referral.ts — handler do comando /indicar
-import { Context } from 'grammy';
+// FIX-BUILD: troca 'grammy' por 'telegraf' e '../lib/logger' por console
+import { Context } from 'telegraf';
 import { registerReferral, getReferralStats } from '../services/referralClient';
-import { logger } from '../lib/logger';
 
 const BOT_USERNAME = process.env.BOT_USERNAME ?? '';
 
@@ -11,7 +11,7 @@ const BOT_USERNAME = process.env.BOT_USERNAME ?? '';
  */
 export async function handleReferral(ctx: Context): Promise<void> {
   const telegramId = String(ctx.from?.id);
-  if (!telegramId) return;
+  if (!telegramId || telegramId === 'undefined') return;
 
   // Link de indicação usa deep link do Telegram: t.me/BOT?start=ref_TELEGRAMID
   const refLink = `https://t.me/${BOT_USERNAME}?start=ref_${telegramId}`;
@@ -26,7 +26,7 @@ export async function handleReferral(ctx: Context): Promise<void> {
         `• Total ganho: *R$ ${stats.totalEarned.toFixed(2)}*`;
     }
   } catch (err) {
-    logger.warn('[referral] Erro ao buscar stats:', err);
+    console.warn('[referral] Erro ao buscar stats:', err);
   }
 
   await ctx.reply(
@@ -53,10 +53,10 @@ export async function processReferralStart(
   const referrerTelegramId = startPayload.replace('ref_', '');
   const referredTelegramId = String(ctx.from?.id);
 
-  if (!referredTelegramId || referrerTelegramId === referredTelegramId) return;
+  if (!referredTelegramId || referredTelegramId === 'undefined' || referrerTelegramId === referredTelegramId) return;
 
   const result = await registerReferral(referrerTelegramId, referredTelegramId);
   if (result.success) {
-    logger.info(`[referral] Novo indicado ${referredTelegramId} via ${referrerTelegramId}`);
+    console.info(`[referral] Novo indicado ${referredTelegramId} via ${referrerTelegramId}`);
   }
 }

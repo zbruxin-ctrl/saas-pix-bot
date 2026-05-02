@@ -16,6 +16,7 @@
  * BUG FIX: answerCbQuery chamado ANTES de qualquer operação async para evitar
  *          timeout de 30s do Telegram que silencia o bot.
  * FEAT-PRICING: tela de cupom/referral antes de gerar PIX; exibe desconto no resumo.
+ * FIX-TS2352: double cast via unknown para acessar campos opcionais de CreatePaymentResponse
  */
 import { Context, Markup } from 'telegraf';
 import { Telegraf } from 'telegraf';
@@ -170,9 +171,11 @@ export async function executePayment(
     delete session.pendingCoupon;
     await saveSession(userId, session);
 
+    const paymentAny = payment as unknown as Record<string, unknown>;
+
     if (payment.paidWithBalance) {
-      const discountLine = (payment as Record<string, unknown>).discountAmount
-        ? `\n🏷️ <b>Desconto aplicado:</b> R$ ${escapeHtml(Number((payment as Record<string, unknown>).discountAmount).toFixed(2))} (cupom ${escapeHtml(String((payment as Record<string, unknown>).couponCode ?? ''))})\n`
+      const discountLine = paymentAny.discountAmount
+        ? `\n🏷️ <b>Desconto aplicado:</b> R$ ${escapeHtml(Number(paymentAny.discountAmount).toFixed(2))} (cupom ${escapeHtml(String(paymentAny.couponCode ?? ''))})\n`
         : '';
 
       await editOrReply(
@@ -204,8 +207,8 @@ export async function executePayment(
       ? `\n💳 *Saldo usado:* R$ ${escapeMd(Number(payment.balanceUsed).toFixed(2))}\n📱 *PIX a pagar:* R$ ${escapeMd(Number(payment.pixAmount).toFixed(2))}`
       : '';
 
-    const discountMdLine = (payment as Record<string, unknown>).discountAmount
-      ? `\n🏷️ *Desconto:* R$ ${escapeMd(Number((payment as Record<string, unknown>).discountAmount).toFixed(2))}`
+    const discountMdLine = paymentAny.discountAmount
+      ? `\n🏷️ *Desconto:* R$ ${escapeMd(Number(paymentAny.discountAmount).toFixed(2))}`
       : '';
 
     const qrBuffer = Buffer.from(payment.pixQrCode, 'base64');

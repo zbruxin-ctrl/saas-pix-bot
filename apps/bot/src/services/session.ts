@@ -6,11 +6,12 @@
  * P1 FIX: sessions migradas para Redis — sem perda de contexto em restart.
  * FIX #1: campo pixExpiresAt adicionado — permite re-agendar o timer de
  *         expiração do PIX ao receber /start após um restart do bot.
+ * FIX-BUILD: adiciona 'awaiting_coupon' ao step + pendingProductId/pendingCoupon à interface
  */
 import { redis } from './redis';
 
 export interface UserSession {
-  step: 'idle' | 'selecting_product' | 'awaiting_payment' | 'awaiting_deposit_amount';
+  step: 'idle' | 'selecting_product' | 'awaiting_payment' | 'awaiting_deposit_amount' | 'awaiting_coupon';
   selectedProductId?: string;
   paymentId?: string;
   /** ISO string com a data/hora de expiração do PIX em aberto (FIX #1) */
@@ -20,6 +21,10 @@ export interface UserSession {
   mainMessageId?: number;
   firstName?: string;
   lastActivityAt: number;
+  /** Produto pendente enquanto aguarda input de cupom */
+  pendingProductId?: string;
+  /** Cupom digitado pelo usuário, antes de confirmar pagamento */
+  pendingCoupon?: string | null;
   /** Armazena produtos em cache local na sessão para evitar re-fetch */
   products?: never;
 }
