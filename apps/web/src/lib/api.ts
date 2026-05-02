@@ -303,9 +303,14 @@ export async function getReferrals(params?: {
   page?: number;
   perPage?: number;
   search?: string;
-}): Promise<any> {
+}): Promise<{ data: any[]; total: number; totalPages: number; summary: any }> {
   const res = await api.get('/admin/referrals', { params });
-  return res.data.data;
+  return {
+    data:       res.data.data       ?? [],
+    total:      res.data.total      ?? 0,
+    totalPages: res.data.totalPages ?? 1,
+    summary:    res.data.summary    ?? null,
+  };
 }
 
 // ─── Coupons ───────────────────────────────────────────────────────────────────────
