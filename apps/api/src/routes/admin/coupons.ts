@@ -10,6 +10,7 @@
 // FIX L24: _count.uses → _count.couponUses (nome correto da relação no schema)
 // FIX L52: removido campo `description` (não existe no model Coupon)
 // FIX L139: removido campo `label` (não existe no model VolumeTier)
+// FIX-VALIDATION: POST e PUT validam discountType=PERCENT max 100%
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { requireRole, AuthenticatedRequest } from '../../middleware/auth';
@@ -49,6 +50,12 @@ adminCouponsRouter.post('/', async (req: AuthenticatedRequest, res: Response) =>
   if (!['PERCENT', 'FIXED'].includes(discountType)) {
     throw new AppError('discountType deve ser PERCENT ou FIXED.', 400);
   }
+  if (discountType === 'PERCENT' && Number(discountValue) > 100) {
+    throw new AppError('discountValue não pode ser maior que 100% para cupons percentuais.', 400);
+  }
+  if (Number(discountValue) <= 0) {
+    throw new AppError('discountValue deve ser maior que zero.', 400);
+  }
 
   const coupon = await prisma.coupon.create({
     data: {
@@ -82,6 +89,16 @@ adminCouponsRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) 
 
   const existing = await prisma.coupon.findUnique({ where: { id } });
   if (!existing) throw new AppError('Cupom não encontrado.', 404);
+
+  // Valida discountValue quando discountType é PERCENT (novo ou já existente)
+  const effectiveType = discountType ?? existing.discountType;
+  const effectiveValue = discountValue !== undefined ? Number(discountValue) : Number(existing.discountValue);
+  if (effectiveType === 'PERCENT' && effectiveValue > 100) {
+    throw new AppError('discountValue não pode ser maior que 100% para cupons percentuais.', 400);
+  }
+  if (discountValue !== undefined && Number(discountValue) <= 0) {
+    throw new AppError('discountValue deve ser maior que zero.', 400);
+  }
 
   const updated = await prisma.coupon.update({
     where: { id },

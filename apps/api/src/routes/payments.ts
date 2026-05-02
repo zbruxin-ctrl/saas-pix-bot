@@ -13,6 +13,7 @@
 // FEAT-BLOCKED: /bot-config inclui isBlocked do usuario (por telegramId query param)
 // SEC FIX #6: GET /:id/status e POST /:id/cancel agora exigem telegramId e
 //   verificam ownership antes de retornar/cancelar (impede consulta de pagamentos alheios)
+// FIX-COUPON: couponCode e referralCode adicionados ao createPaymentSchema
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -31,6 +32,8 @@ const createPaymentSchema = z.object({
   firstName: z.string().optional(),
   username: z.string().optional(),
   paymentMethod: z.string().optional(),
+  couponCode: z.string().optional(),
+  referralCode: z.string().optional(),
 });
 
 const createDepositSchema = z.object({

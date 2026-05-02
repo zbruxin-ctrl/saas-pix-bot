@@ -12,6 +12,7 @@
 // SEC FIX #6: getPaymentStatus e cancelPayment agora enviam telegramId
 // PERF #7: timeout por operacao — createPayment/createDeposit usam 25s
 //   (Neon cold start + chamada Mercado Pago podem exceder 8s facilmente)
+// FIX-COUPON: createPayment aceita e envia couponCode e referralCode
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
 import type {
@@ -240,6 +241,8 @@ class ApiClient {
     firstName?: string;
     username?: string;
     paymentMethod?: PaymentMethod;
+    couponCode?: string;
+    referralCode?: string;
   }): Promise<CreatePaymentResponse> {
     invalidateBalanceCache(params.telegramId);
     try {
