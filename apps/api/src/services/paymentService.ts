@@ -28,6 +28,7 @@
 //            usa refundPayment em vez de cancelPayment no MP
 // FIX-BUILD2: troca env.WEBHOOK_URL → env.BOT_WEBHOOK_URL (variável correta do schema)
 // FEAT-PRICING: integra applyPricing, commitCouponUse, commitReferral e payReferralReward
+// FIX-TS2352: double cast via unknown para extrair couponCode/referralCode de CreatePaymentRequest
 import { randomUUID } from 'crypto';
 import { PaymentStatus, PaymentMethod, StockItemStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -179,8 +180,9 @@ const balancePaymentLock = new Set<string>();
 export class PaymentService {
   async createPayment(data: CreatePaymentRequest): Promise<CreatePaymentResponse> {
     const { telegramId, productId, firstName, username, paymentMethod } = data;
-    const couponCode = (data as Record<string, unknown>).couponCode as string | undefined;
-    const referralCode = (data as Record<string, unknown>).referralCode as string | undefined;
+    const dataAsAny = data as unknown as Record<string, unknown>;
+    const couponCode = dataAsAny.couponCode as string | undefined;
+    const referralCode = dataAsAny.referralCode as string | undefined;
 
     const [product, telegramUser] = await Promise.all([
       prisma.product.findUnique({ where: { id: productId, isActive: true } }),
