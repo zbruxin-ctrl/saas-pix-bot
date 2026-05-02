@@ -48,8 +48,6 @@ async function editOrReply(
       return;
     }
   } catch (err: unknown) {
-    // Ignora apenas "message is not modified" (400); outros erros são silenciados também
-    // pois o fallback abaixo garante a entrega.
     void err;
   }
   await ctx.reply(text, extra as never);
@@ -78,10 +76,6 @@ export function cancelPIXTimer(userId: number): void {
 
 // ─── Helpers de entrega ──────────────────────────────────────────────────────
 
-/**
- * Monta a mensagem de confirmação de pagamento + entrega.
- * Se deliveryContent estiver disponível, exibe dentro de <pre>.
- */
 function buildDeliveryMessage(
   productName: string,
   deliveryContent?: string | null
@@ -104,9 +98,6 @@ function buildDeliveryMessage(
   );
 }
 
-/**
- * Teclado exibido após uma compra confirmada.
- */
 function afterPurchaseKeyboard(productId?: string): ReturnType<typeof Markup.inlineKeyboard> {
   const rows: ReturnType<typeof Markup.button.callback>[][] = [];
   if (productId) {
@@ -359,9 +350,8 @@ export async function executePayment(
       await schedulePIXExpiry(ctx, payment.paymentId, userId, expiresAt);
     } else {
       // BALANCE — entrega imediata
-      // Passamos por unknown primeiro para evitar o erro TS2352 no cast para Record<string, unknown>
-      const paymentAny     = payment as unknown as Record<string, unknown>;
-      const deliveryContent = (paymentAny.deliveryContent as string | null | undefined) ?? null;
+      // CreatePaymentResponse não declara deliveryContent — acessamos via cast seguro
+      const deliveryContent = (payment as unknown as { deliveryContent?: string | null }).deliveryContent ?? null;
       const productName     = payment.productName ?? productId;
       const usedCoupons     = session.usedCoupons ?? [];
       await clearSession(userId, session.firstName, usedCoupons);

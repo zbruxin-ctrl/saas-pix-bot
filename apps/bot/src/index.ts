@@ -14,6 +14,7 @@ import { apiClient } from './services/apiClient';
 import { getSession, saveSession, clearSession } from './services/session';
 import { validateCoupon } from './services/couponClient';
 import { registerReferral } from './services/referralClient';
+import type { WalletTransactionDTO } from '@saas-pix/shared';
 import {
   initPaymentHandlers,
   executePayment,
@@ -27,13 +28,6 @@ import {
 } from './handlers/payments';
 
 type ProductDTO = Awaited<ReturnType<typeof apiClient.getProducts>>[number];
-
-type TxRecord = {
-  type: string;
-  amount: number;
-  description?: string;
-  createdAt?: string;
-};
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN não definido');
@@ -165,13 +159,14 @@ async function showBalance(ctx: Context): Promise<void> {
     const userId = ctx.from!.id;
     const data   = await apiClient.getBalance(String(userId));
 
-    const txs = ((data as unknown as { transactions?: unknown[] }).transactions ?? []) as TxRecord[];
+    // WalletBalanceResponse já tem transactions: WalletTransactionDTO[]
+    const txs: WalletTransactionDTO[] = data.transactions ?? [];
 
     let historyText = '';
     if (txs.length > 0) {
       const lines = txs.slice(0, 5).map((t) => {
-        const sign  = t.type === 'CREDIT' ? '+' : '-';
-        const emoji = t.type === 'CREDIT' ? '🟢' : '🔴';
+        const sign  = t.type === 'DEPOSIT' ? '+' : '-';
+        const emoji = t.type === 'DEPOSIT' ? '🟢' : '🔴';
         const date  = t.createdAt
           ? new Date(t.createdAt).toLocaleDateString('pt-BR')
           : '';
@@ -267,7 +262,7 @@ async function showOrders(ctx: Context): Promise<void> {
     const lines = orders.slice(0, 10).map((o, i) => {
       const status =
         o.status === 'DELIVERED'  ? '✅' :
-        o.status === 'PENDING'    ? '⏳' :
+        o.status === 'PROCESSING' ? '⏳' :
         o.status === 'CANCELLED'  ? '❌' : '❓';
       return `${i + 1}. ${status} <b>${o.productName}</b> — R$ ${Number(o.amount).toFixed(2)}`;
     });
