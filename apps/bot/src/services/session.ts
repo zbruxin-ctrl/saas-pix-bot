@@ -8,6 +8,7 @@
  *         expiração do PIX ao receber /start após um restart do bot.
  * FIX-BUILD: adiciona 'awaiting_coupon' ao step + pendingProductId/pendingCoupon à interface
  * FIX-COUPON-DISCOUNT: adiciona pendingCouponDiscount para persistir valor de desconto entre telas
+ * FEAT-COPYPASTE-CHECK: adiciona pixQrCodeText para reenviar copia e cola ao verificar pagamento
  */
 import { redis } from './redis';
 
@@ -17,6 +18,8 @@ export interface UserSession {
   paymentId?: string;
   /** ISO string com a data/hora de expiração do PIX em aberto (FIX #1) */
   pixExpiresAt?: string;
+  /** Copia e Cola do PIX gerado — reexibido ao verificar pagamento pendente */
+  pixQrCodeText?: string;
   depositPaymentId?: string;
   depositMessageId?: number;
   mainMessageId?: number;
