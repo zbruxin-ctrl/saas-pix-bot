@@ -38,6 +38,28 @@ const bot = new Telegraf(BOT_TOKEN);
 
 initPaymentHandlers();
 
+// ─── showHome ─────────────────────────────────────────────────────────────────
+
+async function showHome(ctx: any) {
+  const firstName = ctx.from?.first_name || 'visitante';
+  const text = `👋 <b>Olá, ${firstName}!</b>\n\nEscolha uma opção abaixo para continuar:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
+    [Markup.button.callback('💰 Meu Saldo', 'show_balance')],
+    [Markup.button.callback('📦 Meus Pedidos', 'show_orders')],
+    [Markup.button.callback('❓ Ajuda', 'show_help')],
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+      return;
+    } catch { /* mensagem idêntica — ignora */ }
+  }
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+}
+
 // ─── /start ───────────────────────────────────────────────────────────────────
 
 bot.start(async (ctx) => {
@@ -48,7 +70,6 @@ bot.start(async (ctx) => {
 
     if (referralCode && referralCode !== String(userId)) {
       try {
-        // registerReferral(referrerTelegramId, referredTelegramId)
         await registerReferral(referralCode, String(userId));
       } catch { /**/ }
     }
@@ -72,23 +93,15 @@ bot.start(async (ctx) => {
     session.firstName = ctx.from.first_name;
     await saveSession(userId, session);
 
-    const welcomeMsg =
-      process.env.BOT_WELCOME_MESSAGE ??
-      `Olá, <b>${ctx.from.first_name}</b>! Bem-vindo(a). Use /produtos para ver o catálogo.`;
-
-    await ctx.reply(
-      welcomeMsg.replace('{nome}', ctx.from.first_name),
-      {
-        parse_mode: 'HTML',
-        reply_markup: Markup.keyboard([
-          ['🛋️ Produtos', '💰 Meu Saldo'],
-          ['💳 Depositar', '💬 Suporte'],
-        ]).resize().reply_markup,
-      }
-    );
+    await showHome(ctx);
   } catch (err) {
     console.error('[/start] Erro:', err);
   }
+});
+
+bot.action('show_home', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  await showHome(ctx);
 });
 
 // ─── /produtos ────────────────────────────────────────────────────────────────
@@ -109,11 +122,18 @@ async function showProducts(ctx: any) {
         `select_product_${p.id}`
       ),
     ]);
+    buttons.push([Markup.button.callback('◀️ Voltar', 'show_home')]);
 
-    await ctx.reply('🛋️ <b>Produtos disponíveis:</b>\n\nEscolha um produto:', {
-      parse_mode: 'HTML',
-      reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
-    });
+    const text = '🛒 <b>Produtos disponíveis:</b>\n\nEscolha um produto:';
+    const replyMarkup = Markup.inlineKeyboard(buttons).reply_markup;
+
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: replyMarkup });
+        return;
+      } catch { /* ignora */ }
+    }
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: replyMarkup });
   } catch (err) {
     console.error('[showProducts] erro:', err);
     await ctx.reply('❌ Erro ao buscar produtos. Tente novamente.', { parse_mode: 'HTML' });
@@ -121,10 +141,9 @@ async function showProducts(ctx: any) {
 }
 
 bot.command('produtos', showProducts);
-bot.hears('🛋️ Produtos', showProducts);
 
 bot.action('show_products', async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
+  await ctx.answerCbQuery('⏳ Carregando produtos...').catch(() => {});
   await showProducts(ctx);
 });
 
@@ -134,10 +153,18 @@ async function showBalance(ctx: any) {
   try {
     const userId = ctx.from!.id;
     const data = await apiClient.getBalance(String(userId));
-    await ctx.reply(
-      `💰 <b>Seu saldo:</b> R$ ${Number(data.balance).toFixed(2)}`,
-      { parse_mode: 'HTML' }
-    );
+    const text = `💰 <b>Seu saldo:</b> R$ ${Number(data.balance).toFixed(2)}`;
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('💳 Depositar', 'deposit_balance')],
+      [Markup.button.callback('◀️ Voltar', 'show_home')],
+    ]);
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+        return;
+      } catch { /* ignora */ }
+    }
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
   } catch (err) {
     console.error('[showBalance] erro:', err);
     await ctx.reply('❌ Erro ao buscar saldo.', { parse_mode: 'HTML' });
@@ -145,28 +172,14 @@ async function showBalance(ctx: any) {
 }
 
 bot.command('saldo', showBalance);
-bot.hears('💰 Meu Saldo', showBalance);
 
-// ─── Suporte ──────────────────────────────────────────────────────────────────
+bot.action('show_balance', async (ctx) => {
+  await ctx.answerCbQuery('⏳ Buscando saldo...').catch(() => {});
+  await showBalance(ctx);
+});
 
-async function showSupport(ctx: any) {
-  try {
-    const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
-    const msg = phone
-      ? `💬 <b>Suporte:</b>\n\n<a href="https://wa.me/${phone}">Falar com suporte via WhatsApp</a>`
-      : `💬 Entre em contato com o suporte pelo administrador do bot.`;
-    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
-  } catch (err) {
-    console.error('[showSupport] erro:', err);
-  }
-}
-
-bot.command('suporte', showSupport);
-bot.hears('💬 Suporte', showSupport);
-
-// ─── Depositar ────────────────────────────────────────────────────────────────
-
-async function showDeposit(ctx: any) {
+bot.action('deposit_balance', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   try {
     const userId = ctx.from!.id;
     const session = await getSession(userId);
@@ -177,12 +190,95 @@ async function showDeposit(ctx: any) {
       { parse_mode: 'HTML' }
     );
   } catch (err) {
-    console.error('[showDeposit] erro:', err);
+    console.error('[deposit_balance] erro:', err);
+  }
+});
+
+// ─── /pedidos ─────────────────────────────────────────────────────────────────
+
+async function showOrders(ctx: any) {
+  const userId = ctx.from!.id;
+  try {
+    const orders = await apiClient.getOrders(String(userId));
+
+    if (!orders || orders.length === 0) {
+      const text = '🔭 <b>Você ainda não tem pedidos.</b>\n\nFaça sua primeira compra!';
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
+        [Markup.button.callback('◀️ Voltar', 'show_home')],
+      ]);
+      if (ctx.callbackQuery) {
+        try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
+      }
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+      return;
+    }
+
+    const lines = orders.slice(0, 10).map((o: any, i: number) => {
+      const status = o.status === 'DELIVERED' ? '✅' : o.status === 'PENDING' ? '⏳' : o.status === 'CANCELLED' ? '❌' : '❓';
+      return `${i + 1}. ${status} <b>${o.productName}</b> — R$ ${Number(o.amount).toFixed(2)}`;
+    });
+
+    const text = `<b>📦 Seus Últimos Pedidos</b>\n\n${lines.join('\n')}\n\n<i>Exibindo até 10 pedidos mais recentes.</i>`;
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🛒 Nova Compra', 'show_products')],
+      [Markup.button.callback('◀️ Voltar', 'show_home')],
+    ]);
+    if (ctx.callbackQuery) {
+      try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
+    }
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+  } catch {
+    await ctx.reply('⚠️ Erro ao carregar pedidos. Tente novamente!', { parse_mode: 'HTML' });
   }
 }
 
-bot.command('depositar', showDeposit);
-bot.hears('💳 Depositar', showDeposit);
+bot.command('meus_pedidos', showOrders);
+
+bot.action('show_orders', async (ctx) => {
+  await ctx.answerCbQuery('📦 Carregando pedidos...').catch(() => {});
+  await showOrders(ctx);
+});
+
+// ─── Ajuda ────────────────────────────────────────────────────────────────────
+
+async function showHelp(ctx: any) {
+  const text =
+    `<b>❓ Central de Ajuda</b>\n\n` +
+    `<b>Como funciona?</b>\n` +
+    `1. Escolha um produto em 🛒 <b>Ver Produtos</b>\n` +
+    `2. Selecione a forma de pagamento (PIX ou Saldo)\n` +
+    `3. Pague e receba seu produto automaticamente\n\n` +
+    `<b>Problemas?</b>\n` +
+    `• PIX não aprovado? Aguarde até 2 minutos e verifique novamente.\n` +
+    `• Produto não entregue? Entre em contato com o suporte.`;
+  const keyboard = Markup.inlineKeyboard([[Markup.button.callback('◀️ Voltar', 'show_home')]]);
+  if (ctx.callbackQuery) {
+    try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup }); return; } catch { /* ignora */ }
+  }
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+}
+
+bot.command('ajuda', showHelp);
+
+bot.action('show_help', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  await showHelp(ctx);
+});
+
+// ─── Suporte ──────────────────────────────────────────────────────────────────
+
+bot.command('suporte', async (ctx) => {
+  try {
+    const phone = process.env.SUPPORT_PHONE_NUMBER ?? '';
+    const msg = phone
+      ? `💬 <b>Suporte:</b>\n\n<a href="https://wa.me/${phone}">Falar com suporte via WhatsApp</a>`
+      : `💬 Entre em contato com o suporte pelo administrador do bot.`;
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+  } catch (err) {
+    console.error('[showSupport] erro:', err);
+  }
+});
 
 // ─── Seleção de produto → tela de quantidade ──────────────────────────────────
 
@@ -390,7 +486,6 @@ bot.on('text', async (ctx) => {
         return;
       }
       try {
-        // createDeposit(telegramId, amount, firstName?, username?)
         const deposit = await apiClient.createDeposit(
           String(userId),
           amount,
