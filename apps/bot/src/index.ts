@@ -322,6 +322,7 @@ bot.on(message('text'), async (ctx) => {
       // Salva na sessão somente após validar tudo
       session.pendingCoupon = couponCode;
       session.step = 'selecting_product';
+      session.mainMessageId = undefined; // 👈 ADICIONAR ISSO
       await saveSession(userId, session);
 
       await ctx.reply(
