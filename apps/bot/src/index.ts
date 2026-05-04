@@ -17,6 +17,8 @@
  * FIX-MD2HTML: welcomeMessage convertida de Markdown para HTML antes de exibir.
  * FIX-NODUP: cabeçalho hardcoded removido — welcomeMessage já contém o cabeçalho completo.
  * FEAT-WELCOME-VARS: placeholders {firstName}, {nome}, {name} e {username} agora são substituídos dinamicamente.
+ * FIX-IMPORT: cancelPIXTimer movido para import de './services/locks' (não exportado por payments.ts).
+ * FEAT-PIX-RESTORE: restorePixTimers() chamado no boot para reagendar timers PIX persistidos no Redis.
  */
 import { Telegraf, Markup } from 'telegraf';
 import type { Context } from 'telegraf';
@@ -24,6 +26,8 @@ import { apiClient } from './services/apiClient';
 import { getSession, saveSession, clearSession } from './services/session';
 import { validateCoupon } from './services/couponClient';
 import { registerReferral } from './services/referralClient';
+import { cancelPIXTimer } from './services/locks';
+import { restorePixTimers } from './services/pixExpiry';
 import type { WalletTransactionDTO } from '@saas-pix/shared';
 import {
   initPaymentHandlers,
@@ -34,7 +38,6 @@ import {
   showQuantityScreen,
   showCouponInputScreen,
   schedulePIXExpiry,
-  cancelPIXTimer,
 } from './handlers/payments';
 
 type ProductDTO = Awaited<ReturnType<typeof apiClient.getProducts>>[number];
@@ -675,7 +678,7 @@ bot.on('text', async (ctx) => {
           await ctx.replyWithPhoto(
             { url: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}` },
             {
-              caption: `💳 *PIX gerado\\!*\n\n*Valor:* R\\$ ${String(value.toFixed(2)).replace('.', '\\.')}\n\nEscaneie o QR ou copie o código abaixo:`,
+              caption: `💳 *PIX gerado\\!*\n\n*Valor:* R\\$ ${String(value.toFixed(2)).replace('.', '\\.')}\\n\\nEscaneie o QR ou copie o código abaixo:`,
               parse_mode: 'MarkdownV2',
               reply_markup: Markup.inlineKeyboard([
                 [Markup.button.callback('🔄 Verificar Depósito', `check_payment_${deposit.paymentId}`)],
@@ -710,6 +713,27 @@ bot.on('text', async (ctx) => {
     console.error('[bot.on text] erro:', err);
   }
 });
+
+// ─── Boot: reagenda timers PIX que sobreviveram a um redeploy ────────────────
+
+async function sendPixExpiredMessage(userId: number, _paymentId: string): Promise<void> {
+  await bot.telegram.sendMessage(
+    userId,
+    '⏰ <b>Seu PIX expirou.</b>\n\nO tempo para pagamento acabou. Use /start para fazer um novo pedido.',
+    {
+      parse_mode: 'HTML',
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('🏠 Menu Principal', 'show_home')],
+      ]).reply_markup,
+    }
+  );
+}
+
+restorePixTimers(sendPixExpiredMessage).catch((err) =>
+  console.error('[boot] Erro ao restaurar timers PIX:', err)
+);
+
+// ─── Launch ──────────────────────────────────────────────────────────────────
 
 const WEBHOOK_URL  = process.env.WEBHOOK_URL;
 const WEBHOOK_PORT = parseInt(process.env.PORT ?? '3001', 10);
