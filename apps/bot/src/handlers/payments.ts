@@ -63,6 +63,15 @@ function parseAccountJson(content: string): Record<string, string> | null {
   return null;
 }
 
+/** Extrai um campo string opcional de qualquer objeto, sem erros de tipo. */
+function strField(obj: unknown, key: string): string | null {
+  if (obj && typeof obj === 'object' && key in (obj as object)) {
+    const val = (obj as Record<string, unknown>)[key];
+    return typeof val === 'string' ? val : null;
+  }
+  return null;
+}
+
 /**
  * Tenta editar a mensagem atual (se vier de callback) ou envia nova mensagem.
  */
@@ -410,10 +419,9 @@ export async function executePayment(
       if (pendingCoupon) await markCouponUsed(userId, pendingCoupon);
       await clearSession(userId, firstName);
 
-      // Extrai deliveryContent e confirmationMessage do retorno da API
-      const paymentData         = payment as Record<string, unknown>;
-      const deliveryContent     = (paymentData.deliveryContent     as string | undefined) ?? null;
-      const confirmationMessage = (paymentData.confirmationMessage as string | undefined) ?? null;
+      // Cast seguro via unknown para extrair campos extras da resposta da API
+      const deliveryContent     = strField(payment, 'deliveryContent');
+      const confirmationMessage = strField(payment, 'confirmationMessage');
 
       await ctx.reply(
         buildDeliveryMessage(payment.productName ?? productId, deliveryContent, confirmationMessage),
@@ -495,9 +503,8 @@ export async function handleCheckPayment(
       cancelPIXTimer(userId);
       await clearSession(userId, firstName);
 
-      const statusData          = status as Record<string, unknown>;
-      const confirmationMessage = (statusData.confirmationMessage as string | undefined) ?? null;
-      const deliveryContent     = (statusData.deliveryContent     as string | undefined)
+      const confirmationMessage = strField(status, 'confirmationMessage');
+      const deliveryContent     = strField(status, 'deliveryContent')
                                     ?? (status.deliveryContent as string | undefined)
                                     ?? null;
 
