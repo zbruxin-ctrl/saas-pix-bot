@@ -5,6 +5,8 @@
 // FIX-TYPES: callbacks de payReferralReward com tipos explícitos (L837/854/872)
 // FIX-BUILD: corrige campos Referral (referredId @unique, rewardPaid em vez de rewarded)
 // FIX-ZERO-COUPON: bloqueia cupom que resulte em valor zero ou negativo
+// FIX-REFERRAL-UPSERT: commitReferral usa upsert para ligar paymentId ao registro
+//   criado pelo registerReferral no /start (evitava falha silenciosa + recompensa nunca paga)
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 
@@ -249,8 +251,16 @@ export async function commitCouponUse(
 
 /**
  * Deve ser chamado DENTRO de uma $transaction de pagamento.
- * Registra a relação de referral (sem pagar recompensa ainda).
- * Idempotente: se já existir (referredId @unique), ignora silenciosamente.
+ *
+ * FIX-REFERRAL-UPSERT: O registerReferral (chamado no /start) já cria o registro
+ * Referral com referredId mas sem paymentId nem rewardAmount.
+ * Se tentarmos criar um novo registro, o unique constraint em referredId causa falha
+ * silenciosa — o registro fica sem paymentId, e payReferralReward nunca o encontra.
+ *
+ * Solução: upsert pelo referredId.
+ * - Se já existe (criado pelo /start): atualiza paymentId e rewardAmount.
+ * - Se não existe (usuário chegou sem link de indicação): cria normalmente.
+ * Em ambos os casos, payReferralReward encontrará o registro via {paymentId, rewardPaid:false}.
  */
 export async function commitReferral(
   tx: PrismaTxClient,
@@ -259,20 +269,21 @@ export async function commitReferral(
   paymentId: string,
   rewardAmount: number
 ): Promise<void> {
-  // Idempotente — referredId é @unique, então tentamos criar e ignoramos conflito
-  try {
-    await tx.referral.create({
-      data: {
-        referrerId,
-        referredId,
-        paymentId,
-        rewardAmount,
-        rewardPaid: false,
-      },
-    });
-  } catch {
-    // Já existe (referredId @unique) — ignora silenciosamente
-  }
+  await tx.referral.upsert({
+    where: { referredId },
+    create: {
+      referrerId,
+      referredId,
+      paymentId,
+      rewardAmount,
+      rewardPaid: false,
+    },
+    update: {
+      // Só atualiza se ainda não foi pago (proteção extra contra duplo pagamento)
+      paymentId,
+      rewardAmount,
+    },
+  });
 }
 
 // ─── payReferralReward ──────────────────────────────────────────────────────────────────
