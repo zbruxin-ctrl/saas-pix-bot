@@ -194,7 +194,7 @@ function afterPurchaseKeyboard(productId?: string): ReturnType<typeof Markup.inl
   return Markup.inlineKeyboard(rows);
 }
 
-// ─── Tela de quantidade ──────────────────────────────────────────────────────
+// ─── Tela de quantidade ───────────────────────────────────────────────────────
 
 export async function showQuantityScreen(
   ctx: Context,
@@ -411,8 +411,8 @@ export async function executePayment(
       await clearSession(userId, firstName);
 
       // Extrai deliveryContent e confirmationMessage do retorno da API
-      const paymentData        = payment as Record<string, unknown>;
-      const deliveryContent    = (paymentData.deliveryContent    as string | undefined) ?? null;
+      const paymentData         = payment as Record<string, unknown>;
+      const deliveryContent     = (paymentData.deliveryContent     as string | undefined) ?? null;
       const confirmationMessage = (paymentData.confirmationMessage as string | undefined) ?? null;
 
       await ctx.reply(
@@ -430,14 +430,14 @@ export async function executePayment(
     const qrText    = payment.pixQrCodeText ?? '';
     const qrImage   = payment.pixQrCode ?? '';
 
-    session.step         = 'awaiting_payment';
-    session.paymentId    = payment.paymentId;
-    session.pixExpiresAt = expiresAt;
+    session.step          = 'awaiting_payment';
+    session.paymentId     = payment.paymentId;
+    session.pixExpiresAt  = expiresAt;
     session.pixQrCodeText = qrText;
     if (pendingCoupon) await markCouponUsed(userId, pendingCoupon);
     await saveSession(userId, session);
 
-    const amountStr = String((payment.amount ?? 0).toFixed(2)).replace('.', '\\.');
+    const amountStr  = String((payment.amount ?? 0).toFixed(2)).replace('.', '\\.');
     const balanceStr = payment.balanceUsed && payment.balanceUsed > 0
       ? `\nSaldo usado: R\\$ ${String(payment.balanceUsed.toFixed(2)).replace('.', '\\.')}\n*PIX:* R\\$ ${String((payment.pixAmount ?? payment.amount ?? 0).toFixed(2)).replace('.', '\\.')}`
       : '';
@@ -447,7 +447,7 @@ export async function executePayment(
         { url: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}` },
         {
           caption:
-            `💳 *PIX gerado\!*\n\n` +
+            `💳 *PIX gerado\\!*\n\n` +
             `*Total:* R\\$ ${amountStr}${balanceStr}\n\n` +
             `Escaneie o QR ou copie o código abaixo:`,
           parse_mode: 'MarkdownV2',
@@ -495,11 +495,11 @@ export async function handleCheckPayment(
       cancelPIXTimer(userId);
       await clearSession(userId, firstName);
 
-      const statusData         = status as Record<string, unknown>;
+      const statusData          = status as Record<string, unknown>;
       const confirmationMessage = (statusData.confirmationMessage as string | undefined) ?? null;
-      const deliveryContent    = (statusData.deliveryContent    as string | undefined)
-                                  ?? (status.deliveryContent as string | undefined)
-                                  ?? null;
+      const deliveryContent     = (statusData.deliveryContent     as string | undefined)
+                                    ?? (status.deliveryContent as string | undefined)
+                                    ?? null;
 
       await ctx.reply(
         buildDeliveryMessage(
