@@ -1,4 +1,6 @@
 // routes/admin/dashboard.ts
+// FIX-REFERRAL-STATS: adiciona totalReferrals, referralsPendingConversion e
+//   referralsConverted ao objeto stats do dashboard
 import { Router, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { AuthenticatedRequest } from '../../middleware/auth';
@@ -69,7 +71,6 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       },
     }).catch(() => []);
 
-    // FIX: stock é Int? (nullable) — filtra apenas produtos com stock NOT NULL e <= 3
     const lowStockProducts = await prisma.product.findMany({
       where: {
         isActive: true,
@@ -78,24 +79,43 @@ adminDashboardRouter.get('/', async (_req: AuthenticatedRequest, res: Response) 
       select: { id: true, name: true, stock: true },
     }).catch(() => []);
 
+    // ── Métricas de referral ───────────────────────────────────────────────────
+    // totalReferrals          = todos os registros Referral (indicados cadastrados)
+    // referralsConverted      = rewardPaid: true  (indicado comprou e recompensa foi paga)
+    // referralsPendingConversion = rewardPaid: false E paymentId NOT NULL
+    //                           (indicado usou o link na compra, mas pagamento ainda pendente/expirou)
+    // referralsPendingSignup  = rewardPaid: false E paymentId IS NULL
+    //                           (indicado entrou pelo link mas ainda não comprou)
+    const [totalReferrals, referralsConverted, referralsPendingConversion] = await Promise.all([
+      prisma.referral.count().catch(() => 0),
+      prisma.referral.count({ where: { rewardPaid: true } }).catch(() => 0),
+      prisma.referral.count({ where: { rewardPaid: false, paymentId: { not: null } } }).catch(() => 0),
+    ]);
+    const referralsPendingSignup = totalReferrals - referralsConverted - referralsPendingConversion;
+
     res.json({
       success: true,
       data: {
         stats: {
-          totalRevenue:         Number(revenueResult._sum.amount || 0),
-          totalApproved:        countByStatus('APPROVED'),
-          totalPending:         countByStatus('PENDING'),
-          totalRejected:        countByStatus('REJECTED'),
-          totalExpired:         countByStatus('EXPIRED'),
-          totalCancelled:       countByStatus('CANCELLED'),
-          totalRefunded:        countByStatus('REFUNDED'),
-          revenueToday:         Number(todayRevenue._sum.amount || 0),
-          paymentsToday:        todayPayments,
-          revenueThisMonth:     Number(monthRevenue._sum.amount || 0),
-          paymentsThisMonth:    monthPayments,
+          totalRevenue:                Number(revenueResult._sum.amount || 0),
+          totalApproved:               countByStatus('APPROVED'),
+          totalPending:                countByStatus('PENDING'),
+          totalRejected:               countByStatus('REJECTED'),
+          totalExpired:                countByStatus('EXPIRED'),
+          totalCancelled:              countByStatus('CANCELLED'),
+          totalRefunded:               countByStatus('REFUNDED'),
+          revenueToday:                Number(todayRevenue._sum.amount || 0),
+          paymentsToday:               todayPayments,
+          revenueThisMonth:            Number(monthRevenue._sum.amount || 0),
+          paymentsThisMonth:           monthPayments,
           deliveriesFailedToday,
           webhooksFailedToday,
           ordersWithFailure,
+          // ── Referral ──
+          totalReferrals,
+          referralsConverted,
+          referralsPendingConversion,
+          referralsPendingSignup,
         },
         recentPayments: recentPaymentsRaw.map((p: {
           id: string;
