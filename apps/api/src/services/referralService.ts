@@ -1,6 +1,9 @@
 // referralService.ts — programa de indicação
 // FEAT-REFERRAL-SETTINGS: lê recompensa, mínimo de compra, teto por usuário e
 //   mensagem de recompensa das AdminSettings em vez de valores hardcoded.
+// FIX-REFERRER-UPSERT: registerReferral agora usa upsert para criar o TelegramUser
+//   do indicador caso ele ainda não exista no banco (ex: nunca comprou, só compartilhou
+//   o link). Sem isso, referrerId ficava null e o referralCount travava em 0.
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { getSetting } from '../routes/admin/settings';
@@ -23,12 +26,23 @@ export async function registerReferral(
     return { registered: false, reason: 'Auto-indicação não permitida.' };
   }
 
+  // FIX-REFERRER-UPSERT: garante que o indicador existe no banco mesmo que nunca
+  // tenha interagido com a API antes. Sem isso, findUnique retorna null e o
+  // referralCount fica preso em 0 para sempre.
   const [referrer, referred] = await Promise.all([
-    prisma.telegramUser.findUnique({ where: { telegramId: referrerTelegramId }, select: { id: true } }),
-    prisma.telegramUser.findUnique({ where: { telegramId: referredTelegramId }, select: { id: true } }),
+    prisma.telegramUser.upsert({
+      where:  { telegramId: referrerTelegramId },
+      update: {},
+      create: { telegramId: referrerTelegramId },
+      select: { id: true },
+    }),
+    prisma.telegramUser.findUnique({
+      where:  { telegramId: referredTelegramId },
+      select: { id: true },
+    }),
   ]);
 
-  if (!referrer) return { registered: false, reason: 'Indicador não encontrado.' };
+  // O indicado precisa já existir (ele acabou de mandar a mensagem de início)
   if (!referred) return { registered: false, reason: 'Usuário indicado não encontrado.' };
 
   const existing = await prisma.referral.findUnique({ where: { referredId: referred.id } });
