@@ -1,6 +1,7 @@
 // ALTERAÇÕES: removido hack `payments: undefined`, uso de select+destructuring,
 // adicionado isBlocked no retorno da listagem
 // NOVO: PATCH /:id/block-toggle — bloquear/desbloquear usuário (SUPERADMIN)
+// NOVO: PATCH /:id/firstName — corrigir nome de usuários @lid retroativamente (SUPERADMIN)
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma';
@@ -139,6 +140,51 @@ adminUsersRouter.patch(
   }
 );
 
+// PATCH /api/admin/users/:id/firstName — SUPERADMIN only
+// Corrige retroativamente o nome de exibição de usuários WhatsApp (@lid)
+// Body: { "firstName": "nome ou numero" }
+adminUsersRouter.patch(
+  '/:id/firstName',
+  requireRole('SUPERADMIN'),
+  async (req: Request, res: Response) => {
+    const schema = z.object({
+      firstName: z.string().min(1, 'Nome não pode ser vazio').max(100),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Dados inválidos' });
+      return;
+    }
+
+    const user = await prisma.telegramUser.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, telegramId: true, firstName: true },
+    });
+
+    if (!user) {
+      res.status(404).json({ success: false, error: 'Usuário não encontrado' });
+      return;
+    }
+
+    const updated = await prisma.telegramUser.update({
+      where: { id: req.params.id },
+      data: { firstName: parsed.data.firstName },
+      select: { id: true, telegramId: true, firstName: true },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        id: updated.id,
+        telegramId: updated.telegramId,
+        firstName: updated.firstName,
+        message: `Nome atualizado para "${updated.firstName}".`,
+      },
+    });
+  }
+);
+
 // GET /api/admin/users/export/csv — SUPERADMIN only
 adminUsersRouter.get(
   '/export/csv',
@@ -174,6 +220,6 @@ adminUsersRouter.get(
     const csv = [header, ...rows].join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="usuarios.csv"');
-    res.send('\uFEFF' + csv); // BOM para Excel abrir corretamente
+    res.send('\uFEFF' + csv);
   }
 );
