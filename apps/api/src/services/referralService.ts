@@ -1,9 +1,7 @@
 // referralService.ts — programa de indicação
-// FEAT-REFERRAL-SETTINGS: lê recompensa, mínimo de compra, teto por usuário e
-//   mensagem de recompensa das AdminSettings em vez de valores hardcoded.
-// FIX-REFERRER-UPSERT: registerReferral agora usa upsert para criar o TelegramUser
-//   do indicador caso ele ainda não exista no banco (ex: nunca comprou, só compartilhou
-//   o link). Sem isso, referrerId ficava null e o referralCount travava em 0.
+// FIX-BOTH-UPSERT: upsert nos dois lados (referrer e referred) para que o
+//   registro nunca falhe por "usuário não encontrado", independente de o
+//   usuário já ter interagido com a API antes (ex: WhatsApp, Telegram, etc).
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { getSetting } from '../routes/admin/settings';
@@ -26,9 +24,9 @@ export async function registerReferral(
     return { registered: false, reason: 'Auto-indicação não permitida.' };
   }
 
-  // FIX-REFERRER-UPSERT: garante que o indicador existe no banco mesmo que nunca
-  // tenha interagido com a API antes. Sem isso, findUnique retorna null e o
-  // referralCount fica preso em 0 para sempre.
+  // FIX-BOTH-UPSERT: ambos os usuários são garantidos no banco via upsert.
+  // Antes, o "findUnique" do indicado retornava null quando ele ainda não
+  // havia feito nenhuma compra/consulta, causando "Usuário indicado não encontrado."
   const [referrer, referred] = await Promise.all([
     prisma.telegramUser.upsert({
       where:  { telegramId: referrerTelegramId },
@@ -36,15 +34,15 @@ export async function registerReferral(
       create: { telegramId: referrerTelegramId },
       select: { id: true },
     }),
-    prisma.telegramUser.findUnique({
+    prisma.telegramUser.upsert({
       where:  { telegramId: referredTelegramId },
+      update: {},
+      create: { telegramId: referredTelegramId },
       select: { id: true },
     }),
   ]);
 
-  // O indicado precisa já existir (ele acabou de mandar a mensagem de início)
-  if (!referred) return { registered: false, reason: 'Usuário indicado não encontrado.' };
-
+  // Verifica se já existe um referral para o indicado
   const existing = await prisma.referral.findUnique({ where: { referredId: referred.id } });
   if (existing) {
     return { registered: false, reason: 'Este usuário já foi indicado anteriormente.' };
@@ -63,7 +61,6 @@ export async function payReferralReward(
   paymentId: string,
   onReward: RewardCallback
 ): Promise<void> {
-  // ── Lê todas as configurações do programa ────────────────────────────────────
   const [enabledStr, minPurchaseStr, maxPerUserStr, rewardMsgTpl] = await Promise.all([
     getSetting('referral_enabled'),
     getSetting('referral_min_purchase'),
@@ -73,21 +70,18 @@ export async function payReferralReward(
 
   if (enabledStr === 'false') return;
 
-  // ── Busca o pagamento ─────────────────────────────────────────────────────────
   const payment = await tx.payment.findUnique({
     where: { id: paymentId },
     select: { telegramUserId: true, amount: true },
   });
   if (!payment) return;
 
-  // ── Verifica valor mínimo de compra ───────────────────────────────────────────
   const minPurchase = parseFloat(minPurchaseStr) || 0;
   if (minPurchase > 0 && Number(payment.amount) < minPurchase) {
     logger.info(`[referral] Compra R$${payment.amount} abaixo do mínimo R$${minPurchase} — recompensa não paga`);
     return;
   }
 
-  // ── Busca referral pendente ───────────────────────────────────────────────────
   const referral = await tx.referral.findUnique({
     where: { referredId: payment.telegramUserId },
     include: {
@@ -97,7 +91,6 @@ export async function payReferralReward(
   });
   if (!referral || referral.rewardPaid) return;
 
-  // ── Verifica teto de recompensas por indicador ────────────────────────────────
   const maxPerUser = parseInt(maxPerUserStr, 10) || 0;
   if (maxPerUser > 0) {
     const paidCount = await tx.referral.count({
@@ -109,21 +102,17 @@ export async function payReferralReward(
     }
   }
 
-  // ── Lê valor de recompensa configurado ────────────────────────────────────────
   const rewardRaw = await getSetting('referral_reward_amount');
   const rewardAmount = parseFloat(rewardRaw) || 5.0;
   if (isNaN(rewardAmount) || rewardAmount <= 0) return;
 
-  // ── Monta mensagem com placeholders ──────────────────────────────────────────
   const referredName = referral.referred?.firstName ?? 'alguém';
   const description = rewardMsgTpl
     .replace('{amount}', rewardAmount.toFixed(2))
     .replace('{name}', referredName);
 
-  // ── Delega crédito ao callback ────────────────────────────────────────────────
   await onReward(referral.referrer.telegramId, rewardAmount, description, tx);
 
-  // ── Marca recompensa como paga ────────────────────────────────────────────────
   await tx.referral.update({
     where: { id: referral.id },
     data: { rewardPaid: true, rewardAmount, paymentId },
