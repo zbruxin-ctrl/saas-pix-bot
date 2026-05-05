@@ -24,6 +24,26 @@ interface UsersResult {
   totalPages: number;
 }
 
+// Retorna o melhor identificador legível para o usuário.
+// Prioridade: nome → número de telefone formatado (WhatsApp) → ID bruto
+function getUserLabel(u: User): { name: string; sub: string | null; isPhone: boolean } {
+  if (u.firstName) {
+    return { name: u.firstName, sub: u.username ? `@${u.username}` : null, isPhone: false };
+  }
+  // telegramId com 11-13 dígitos provavelmente é telefone WhatsApp
+  const isPhone = /^\d{10,13}$/.test(u.telegramId);
+  if (isPhone) {
+    // Formata: 5532991240070 → +55 32 99124-0070
+    const d = u.telegramId;
+    let formatted = u.telegramId;
+    if (d.length === 13) formatted = `+${d.slice(0,2)} ${d.slice(2,4)} ${d.slice(4,9)}-${d.slice(9)}`;
+    else if (d.length === 12) formatted = `+${d.slice(0,2)} ${d.slice(2,4)} ${d.slice(4,8)}-${d.slice(8)}`;
+    else if (d.length === 11) formatted = `+${d.slice(0,2)} ${d.slice(2,7)}-${d.slice(7)}`;
+    return { name: formatted, sub: 'WhatsApp', isPhone: true };
+  }
+  return { name: u.telegramId, sub: u.username ? `@${u.username}` : null, isPhone: false };
+}
+
 export default function UsersPage() {
   const [result, setResult] = useState<UsersResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -122,49 +142,58 @@ export default function UsersPage() {
                 <td colSpan={7} className="text-center py-12 text-gray-400">Nenhum usuário encontrado</td>
               </tr>
             ) : (
-              result?.data.map((u) => (
-                <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50">
-                  <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">{u.firstName || '—'}</div>
-                    {u.username && <div className="text-gray-400 text-xs">@{u.username}</div>}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">{u.telegramId}</td>
-                  <td className="px-4 py-3 font-semibold text-green-700">{formatCurrency(u.totalSpent)}</td>
-                  <td className="px-4 py-3 text-gray-700">{u._count?.orders ?? '—'}</td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{formatDate(u.createdAt)}</td>
-                  <td className="px-4 py-3">
-                    <span className={[
-                      'text-xs px-2 py-1 rounded-full font-medium',
-                      u.isBlocked
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-green-100 text-green-700',
-                    ].join(' ')}>
-                      {u.isBlocked ? '🚫 Bloqueado' : '✅ Ativo'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setSelectedUser(u)}
-                        className="text-xs text-blue-600 hover:text-blue-800 font-medium"
-                      >
-                        Ver
-                      </button>
-                      <button
-                        onClick={() => setBlockConfirm(u)}
-                        className={[
-                          'text-xs font-medium',
-                          u.isBlocked
-                            ? 'text-green-600 hover:text-green-800'
-                            : 'text-red-500 hover:text-red-700',
-                        ].join(' ')}
-                      >
-                        {u.isBlocked ? 'Desbloquear' : 'Bloquear'}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
+              result?.data.map((u) => {
+                const label = getUserLabel(u);
+                return (
+                  <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <div className={`font-medium ${label.isPhone ? 'text-blue-700' : 'text-gray-900'}`}>
+                        {label.name}
+                      </div>
+                      {label.sub && (
+                        <div className={`text-xs ${label.isPhone ? 'text-blue-400' : 'text-gray-400'}`}>
+                          {label.sub}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-600">{u.telegramId}</td>
+                    <td className="px-4 py-3 font-semibold text-green-700">{formatCurrency(u.totalSpent)}</td>
+                    <td className="px-4 py-3 text-gray-700">{u._count?.orders ?? '—'}</td>
+                    <td className="px-4 py-3 text-gray-500 text-xs">{formatDate(u.createdAt)}</td>
+                    <td className="px-4 py-3">
+                      <span className={[
+                        'text-xs px-2 py-1 rounded-full font-medium',
+                        u.isBlocked
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-green-100 text-green-700',
+                      ].join(' ')}>
+                        {u.isBlocked ? '🚫 Bloqueado' : '✅ Ativo'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setSelectedUser(u)}
+                          className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                        >
+                          Ver
+                        </button>
+                        <button
+                          onClick={() => setBlockConfirm(u)}
+                          className={[
+                            'text-xs font-medium',
+                            u.isBlocked
+                              ? 'text-green-600 hover:text-green-800'
+                              : 'text-red-500 hover:text-red-700',
+                          ].join(' ')}
+                        >
+                          {u.isBlocked ? 'Desbloquear' : 'Bloquear'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -192,7 +221,6 @@ export default function UsersPage() {
         )}
       </div>
 
-      {/* Modal de detalhes do usuário */}
       {selectedUser && (
         <UserDetailModal
           userId={selectedUser.id}
@@ -201,7 +229,6 @@ export default function UsersPage() {
         />
       )}
 
-      {/* Modal de confirmação de bloqueio */}
       <ConfirmModal
         open={!!blockConfirm}
         title={blockConfirm?.isBlocked ? 'Desbloquear usuário?' : 'Bloquear usuário?'}
