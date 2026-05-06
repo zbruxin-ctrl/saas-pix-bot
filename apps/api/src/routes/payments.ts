@@ -17,6 +17,7 @@
 // FIX-ZOD: parse() envolto em try/catch para retornar 400 em vez de 500
 // FEAT-SUPPORT: /bot-config agora inclui supportPhone lido do painel admin (support_phone)
 // FIX-WELCOME: /bot-config inclui welcomeMessage lido do painel admin (welcome_message)
+// FIX-ROUTES: createDepositPayment → createDeposit; cancelPayment result.reason → result.message
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -65,7 +66,6 @@ async function isUserBlocked(telegramId: string): Promise<boolean> {
 
 /**
  * SEC FIX #6: Verifica se o pagamento pertence ao telegramId informado.
- * Retorna o pagamento se pertencer, null caso contrário.
  */
 async function getPaymentIfOwner(
   paymentId: string,
@@ -87,7 +87,6 @@ async function getPaymentIfOwner(
 // ─── Rotas estáticas PRIMEIRO ─────────────────────────────────────────────────
 
 // GET /api/payments/bot-config?telegramId=xxx
-// Retorna maintenance_mode, maintenance_message, isBlocked, supportPhone e welcomeMessage
 paymentsRouter.get(
   '/bot-config',
   requireBotSecret,
@@ -135,7 +134,6 @@ paymentsRouter.post(
   requireBotSecret,
   paymentRateLimit,
   async (req: Request, res: Response) => {
-    // FIX-ZOD: valida antes de checar manutenção para retornar 400 em payload inválido
     let data: z.infer<typeof createPaymentSchema>;
     try {
       data = createPaymentSchema.parse(req.body);
@@ -166,7 +164,6 @@ paymentsRouter.post(
   requireBotSecret,
   paymentRateLimit,
   async (req: Request, res: Response) => {
-    // FIX-ZOD: valida antes de checar manutenção
     let data: z.infer<typeof createDepositSchema>;
     try {
       data = createDepositSchema.parse(req.body);
@@ -185,7 +182,7 @@ paymentsRouter.post(
       res.status(403).json({ success: false, error: 'Sua conta está suspensa. Entre em contato com o suporte.' });
       return;
     }
-    const result = await paymentService.createDepositPayment(data);
+    const result = await paymentService.createDeposit(data);
     logger.info(`[Deposit] PIX de depósito criado via API: ${result.paymentId}`);
     res.status(201).json({ success: true, data: result });
   }
@@ -356,7 +353,6 @@ paymentsRouter.get(
 // ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────
 
 // POST /api/payments/:id/cancel
-// SEC FIX #6: requer telegramId no body para verificar ownership
 paymentsRouter.post(
   '/:id/cancel',
   requireBotSecret,
@@ -378,16 +374,15 @@ paymentsRouter.post(
 
     const result = await paymentService.cancelPayment(id);
     if (!result.cancelled) {
-      res.status(400).json({ success: false, message: result.reason });
+      res.status(400).json({ success: false, message: result.message });
       return;
     }
     logger.info(`Pagamento ${id} cancelado via bot (telegramId: ${telegramId})`);
-    res.json({ success: true, message: result.reason });
+    res.json({ success: true, message: result.message });
   }
 );
 
 // GET /api/payments/:id/status
-// SEC FIX #6: requer telegramId na query para verificar ownership
 paymentsRouter.get(
   '/:id/status',
   requireBotSecret,
