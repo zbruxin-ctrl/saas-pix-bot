@@ -1,1 +1,1 @@
-import urllib.request; url = "https://raw.githubusercontent.com/zbruxin-ctrl/saas-pix-bot/main/apps/api/src/services/paymentService.ts"
+{new_content}
