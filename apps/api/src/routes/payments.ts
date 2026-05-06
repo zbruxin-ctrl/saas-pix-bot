@@ -18,6 +18,7 @@
 // FEAT-SUPPORT: /bot-config agora inclui supportPhone lido do painel admin (support_phone)
 // FIX-WELCOME: /bot-config inclui welcomeMessage lido do painel admin (welcome_message)
 // FIX-ROUTES: createDepositPayment → createDeposit; cancelPayment result.reason → result.message
+// FIX-QTY-SCHEMA: quantity adicionado ao createPaymentSchema (era descartado pelo Zod)
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -33,6 +34,7 @@ export const paymentsRouter = Router();
 const createPaymentSchema = z.object({
   telegramId: z.string().min(1),
   productId: z.string().min(1),
+  quantity: z.number().int().min(1).max(100).optional(),  // FIX-QTY-SCHEMA
   firstName: z.string().optional(),
   username: z.string().optional(),
   paymentMethod: z.string().optional(),
@@ -47,7 +49,8 @@ const createDepositSchema = z.object({
   username: z.string().optional(),
 });
 
-// ─── Helpers ───────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────
+
 async function isMaintenanceActive(): Promise<{ active: boolean; message: string }> {
   const [mode, msg] = await Promise.all([
     getSetting('maintenance_mode'),
@@ -84,7 +87,7 @@ async function getPaymentIfOwner(
   return payment ?? null;
 }
 
-// ─── Rotas estáticas PRIMEIRO ─────────────────────────────────────────────────
+// ─── Rotas estáticas PRIMEIRO ──────────────────────────────────────────────────
 
 // GET /api/payments/bot-config?telegramId=xxx
 paymentsRouter.get(
@@ -152,7 +155,11 @@ paymentsRouter.post(
       res.status(403).json({ success: false, error: 'Sua conta está suspensa. Entre em contato com o suporte.' });
       return;
     }
-    const result = await paymentService.createPayment(data as Parameters<typeof paymentService.createPayment>[0]);
+    // FIX-QTY-SCHEMA: repassa quantity como qty para o service
+    const result = await paymentService.createPayment({
+      ...data,
+      qty: data.quantity,
+    });
     logger.info(`Pagamento criado via API: ${result.paymentId}`);
     res.status(201).json({ success: true, data: result });
   }
@@ -350,7 +357,7 @@ paymentsRouter.get(
   }
 );
 
-// ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────
+// ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────────
 
 // POST /api/payments/:id/cancel
 paymentsRouter.post(
