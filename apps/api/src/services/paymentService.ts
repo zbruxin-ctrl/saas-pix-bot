@@ -1,10 +1,6 @@
-// paymentService.ts — reescrito para alinhar ao schema Prisma real
-// Schema real: Payment.couponId (não couponCode), sem wallet model (balance em TelegramUser),
-// WalletTransaction.telegramUserId (sem walletId), Order sem productName/amount/quantity,
-// Referral.rewardPaid (não bonusPaid), WalletTransactionType sem BONUS,
-// stockService.reserveStock(productId, telegramUserId, paymentId) — 3 args,
-// deliveryService.deliver(orderId, telegramUser, product) — não deliverStock/consumeStock,
-// couponService exportado como funções (não objeto), AppError em ../lib/AppError
+// paymentService.ts — alinhado ao schema Prisma real + assinaturas reais do mercadoPagoService
+// PixPaymentData: { transactionAmount, description, payerName, externalReference, notificationUrl }
+// verifyPayment(mpId, expectedAmount) → { isApproved, paymentDetail }
 import { PaymentStatus, OrderStatus, StockItemStatus, WalletTransactionType } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -13,8 +9,7 @@ import { stockService } from './stockService';
 import * as couponService from './couponService';
 import { logger } from '../lib/logger';
 import { AppError } from '../lib/AppError';
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+import { env } from '../config/env';
 
 type ProductSnap = {
   id: string;
@@ -24,12 +19,8 @@ type ProductSnap = {
   stock: number | null;
 };
 
-// ─── Cache de status (TTL 5s) ─────────────────────────────────────────────────
-
 const statusCacheTTL = 5_000;
 const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
-
-// ─── Helper: reverte cupom ao expirar/cancelar ────────────────────────────────
 
 async function revertCoupon(paymentId: string): Promise<void> {
   try {
@@ -39,11 +30,7 @@ async function revertCoupon(paymentId: string): Promise<void> {
   }
 }
 
-// ─── paymentService ───────────────────────────────────────────────────────────
-
 export const paymentService = {
-
-  // ─── _payWithBalance ──────────────────────────────────────────────────────
 
   async _payWithBalance(opts: {
     telegramUserId: string;
@@ -115,18 +102,15 @@ export const paymentService = {
 
       paymentId = result.payment.id;
 
-      // Atualiza reserva com paymentId real
       await prisma.stockReservation.updateMany({
         where: { telegramUserId, productId: product.id, status: 'ACTIVE' },
         data: { paymentId: paymentId },
       });
 
-      // Entrega
       const telegramUser = await prisma.telegramUser.findUniqueOrThrow({ where: { id: telegramUserId } });
       const productFull = await prisma.product.findUniqueOrThrow({ where: { id: product.id } });
       await deliveryService.deliver(result.order.id, telegramUser, productFull);
 
-      // Bônus de indicação
       if (referralCode) {
         try {
           const referrer = await prisma.telegramUser.findFirst({
@@ -178,8 +162,6 @@ export const paymentService = {
     };
   },
 
-  // ─── _payWithPix ──────────────────────────────────────────────────────────
-
   async _payWithPix(opts: {
     telegramUserId: string;
     product: ProductSnap;
@@ -202,13 +184,13 @@ export const paymentService = {
 
     let paymentId: string | undefined;
     try {
+      const payerName = [firstName ?? 'Cliente', username ?? 'Telegram'].filter(Boolean).join(' ');
       const mpPayment = await mercadoPagoService.createPixPayment({
-        amount,
+        transactionAmount: amount,
         description: product.name,
-        payerEmail: `${telegramUserId}@telegram.bot`,
-        firstName: firstName ?? 'Cliente',
-        lastName: username ?? 'Telegram',
+        payerName,
         externalReference: telegramUserId,
+        notificationUrl: `${env.API_URL}/webhooks/mercadopago`,
       });
 
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
@@ -251,8 +233,6 @@ export const paymentService = {
     }
   },
 
-  // ─── _payWithMixed ────────────────────────────────────────────────────────
-
   async _payWithMixed(opts: {
     telegramUserId: string;
     product: ProductSnap;
@@ -273,7 +253,7 @@ export const paymentService = {
     expiresAt: string;
     productName: string;
   }> {
-    const { telegramUserId, product, qty, totalAmount, balanceAmount, pixAmount, couponId, firstName, username } = opts;
+    const { telegramUserId, product, totalAmount, balanceAmount, pixAmount, couponId, firstName, username } = opts;
 
     await stockService.reserveStock(product.id, telegramUserId, '__pending__');
 
@@ -301,13 +281,13 @@ export const paymentService = {
         });
       });
 
+      const payerName = [firstName ?? 'Cliente', username ?? 'Telegram'].filter(Boolean).join(' ');
       const mpPayment = await mercadoPagoService.createPixPayment({
-        amount: pixAmount,
+        transactionAmount: pixAmount,
         description: product.name,
-        payerEmail: `${telegramUserId}@telegram.bot`,
-        firstName: firstName ?? 'Cliente',
-        lastName: username ?? 'Telegram',
+        payerName,
         externalReference: telegramUserId,
+        notificationUrl: `${env.API_URL}/webhooks/mercadopago`,
       });
 
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
@@ -359,8 +339,6 @@ export const paymentService = {
       throw err;
     }
   },
-
-  // ─── createPayment ────────────────────────────────────────────────────────
 
   async createPayment(opts: {
     telegramId: string;
@@ -416,7 +394,6 @@ export const paymentService = {
       return this._payWithPix({ telegramUserId, product, qty, amount: totalAmount, couponId, firstName, username });
     }
 
-    // MIXED
     const userData = await prisma.telegramUser.findUnique({ where: { id: telegramUserId }, select: { balance: true } });
     const balanceAmount = Math.min(Number(userData?.balance ?? 0), totalAmount);
     const pixAmount = Math.max(0, totalAmount - balanceAmount);
@@ -426,10 +403,8 @@ export const paymentService = {
       return { ...result, amount: totalAmount };
     }
 
-    return this._payWithMixed({ telegramUserId, product, qty, totalAmount, balanceAmount, pixAmount, couponId, firstName, username });
+    return this._payWithMixed({ telegramUserId, product, qty: 1, totalAmount, balanceAmount, pixAmount, couponId, firstName, username });
   },
-
-  // ─── createDeposit ────────────────────────────────────────────────────────
 
   async createDeposit(opts: {
     telegramId: string;
@@ -452,13 +427,13 @@ export const paymentService = {
       select: { id: true },
     });
 
+    const payerName = [firstName ?? 'Cliente', username ?? 'Telegram'].filter(Boolean).join(' ');
     const mpPayment = await mercadoPagoService.createPixPayment({
-      amount,
+      transactionAmount: amount,
       description: 'Depósito de saldo',
-      payerEmail: `${telegramId}@telegram.bot`,
-      firstName: firstName ?? 'Cliente',
-      lastName: username ?? 'Telegram',
+      payerName,
       externalReference: `deposit_${telegramId}`,
+      notificationUrl: `${env.API_URL}/webhooks/mercadopago`,
     });
 
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
@@ -486,8 +461,6 @@ export const paymentService = {
     };
   },
 
-  // ─── confirmApproval ──────────────────────────────────────────────────────
-
   async confirmApproval(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
@@ -504,7 +477,6 @@ export const paymentService = {
       return;
     }
 
-    // É um depósito (sem produto)
     if (!payment.product || !payment.productId) {
       await prisma.$transaction(async (tx) => {
         await tx.payment.update({
@@ -559,19 +531,15 @@ export const paymentService = {
       });
 
       await deliveryService.deliver(order!.id, telegramUser, product);
-
       statusCache.delete(paymentId);
     } finally {
       await stockService.releaseReservation(paymentId).catch(() => {});
     }
   },
 
-  // Alias para admin/payments.ts (:id/reprocess)
   processApprovedPayment(paymentId: string): Promise<void> {
     return this.confirmApproval(paymentId);
   },
-
-  // ─── handleMercadoPagoWebhook ─────────────────────────────────────────────
 
   async handleMercadoPagoWebhook(data: { action?: string; data?: { id?: string } }): Promise<void> {
     if (data.action !== 'payment.updated' && data.action !== 'payment.created') return;
@@ -580,12 +548,9 @@ export const paymentService = {
 
     setImmediate(async () => {
       try {
-        const mpStatus = await mercadoPagoService.verifyPayment(mpId);
-        if (mpStatus !== 'approved') return;
-
         const payment = await prisma.payment.findFirst({
           where: { mercadoPagoId: mpId },
-          select: { id: true, status: true },
+          select: { id: true, status: true, amount: true },
         });
 
         if (!payment) {
@@ -598,14 +563,19 @@ export const paymentService = {
           return;
         }
 
+        const { isApproved } = await mercadoPagoService.verifyPayment(mpId, Number(payment.amount));
+
+        if (!isApproved) {
+          logger.info(`[webhook] Pagamento ${mpId} ainda não aprovado.`);
+          return;
+        }
+
         await paymentService.confirmApproval(payment.id);
       } catch (err) {
         logger.error('[webhook] Erro ao processar webhook:', err);
       }
     });
   },
-
-  // ─── findExpiredPaymentIds (usado por expirePayments.ts) ──────────────────
 
   async findExpiredPaymentIds(now: Date): Promise<string[]> {
     const payments = await prisma.payment.findMany({
@@ -617,8 +587,6 @@ export const paymentService = {
     });
     return payments.map((p) => p.id);
   },
-
-  // ─── cancelExpiredPayment ─────────────────────────────────────────────────
 
   async cancelExpiredPayment(paymentId: string): Promise<void> {
     const payment = await prisma.payment.findUnique({
@@ -638,14 +606,12 @@ export const paymentService = {
 
     if (payment.mercadoPagoId) {
       mercadoPagoService.refundPayment(payment.mercadoPagoId).catch((err) =>
-        logger.warn(`[cancelExpiredPayment] Falha ao cancelar PIX no MP (${payment.mercadoPagoId}): ignorado`, err)
+        logger.warn(`[cancelExpiredPayment] Falha ao cancelar PIX no MP: ignorado`, err)
       );
     }
 
     statusCache.delete(paymentId);
   },
-
-  // ─── getPaymentStatus ─────────────────────────────────────────────────────
 
   async getPaymentStatus(paymentId: string): Promise<{
     status: PaymentStatus;
@@ -701,8 +667,6 @@ export const paymentService = {
     };
   },
 
-  // ─── cancelPayment ────────────────────────────────────────────────────────
-
   async cancelPayment(paymentId: string): Promise<{ cancelled: boolean; message?: string }> {
     const payment = await prisma.payment.findFirst({
       where: { id: paymentId },
@@ -732,8 +696,6 @@ export const paymentService = {
     statusCache.delete(paymentId);
     return { cancelled: true };
   },
-
-  // ─── getAvailableStock ────────────────────────────────────────────────────
 
   async getAvailableStock(productId: string): Promise<number | null> {
     const items = await prisma.stockItem.count({
