@@ -5,6 +5,7 @@
 // FEAT #2/#3: model AdminSetting adicionado
 // FEAT: Coupon, CouponUse, Referral, VolumeTier adicionados
 // FIX-BUILD: REFERRAL_REWARD adicionado ao WalletTransactionType
+// FEAT-QTY: qty adicionado ao Payment; @unique removido de Order.paymentId e StockItem.paymentId
 generator client {
   provider = "prisma-client-js"
 }
@@ -132,7 +133,7 @@ model StockItem {
   confirmedAt DateTime?
   deliveredAt DateTime?
   releasedAt  DateTime?
-  paymentId   String?         @unique
+  paymentId   String?         // FEAT-QTY: removido @unique para suportar N items por payment
   orderId     String?         @unique
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
@@ -143,6 +144,7 @@ model StockItem {
 
   @@index([productId, status])
   @@index([productId, status, createdAt])
+  @@index([paymentId])  // FEAT-QTY: index simples no lugar do unique
   @@map("stock_items")
 }
 
@@ -215,6 +217,7 @@ model Payment {
   productId      String?
   mercadoPagoId  String?        @unique
   amount         Decimal        @db.Decimal(10, 2)
+  qty            Int            @default(1)  // FEAT-QTY: quantidade de unidades compradas
   status         PaymentStatus  @default(PENDING)
   pixQrCode      String?        @db.Text
   pixQrCodeText  String?        @db.Text
@@ -236,9 +239,9 @@ model Payment {
   telegramUser     TelegramUser      @relation(fields: [telegramUserId], references: [id])
   product          Product?          @relation(fields: [productId], references: [id])
   coupon           Coupon?           @relation(fields: [couponId], references: [id])
-  order            Order?
+  orders           Order[]           // FEAT-QTY: 1 payment → N orders
   stockReservation StockReservation?
-  stockItem        StockItem?
+  stockItems       StockItem[]       // FEAT-QTY: 1 payment → N stock items
   webhookEvents    WebhookEvent[]
   couponUse        CouponUse?
   referral         Referral?
@@ -269,7 +272,7 @@ enum PaymentStatus {
 // ─── Order ────────────────────────────────────────────────────────────────────────────
 model Order {
   id             String      @id @default(cuid())
-  paymentId      String      @unique
+  paymentId      String      // FEAT-QTY: removido @unique para suportar N orders por payment
   telegramUserId String
   productId      String
   status         OrderStatus @default(PROCESSING)
@@ -285,6 +288,7 @@ model Order {
   deliveryMedias DeliveryMedia[]
   stockItem     StockItem?
 
+  @@index([paymentId])  // FEAT-QTY: index simples no lugar do unique
   @@index([telegramUserId])
   @@index([status])
   @@map("orders")
@@ -363,8 +367,8 @@ enum WebhookEventStatus {
 // ─── Coupon ────────────────────────────────────────────────────────────────────────
 model Coupon {
   id             String       @id @default(cuid())
-  code           String       @unique
   discountType   DiscountType
+  code           String       @unique
   discountValue  Decimal      @db.Decimal(10, 2)
   minOrderValue  Decimal?     @db.Decimal(10, 2)
   maxUses        Int?
