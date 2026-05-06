@@ -5,14 +5,10 @@
  * PADRÃO: parse_mode HTML em mensagens de texto.
  *         parse_mode MarkdownV2 APENAS em captions de replyWithPhoto.
  *
- * FEAT-ACCOUNT-VARS: buildDeliveryMessage agora substitui {chave} pelos valores
- *                    do JSON do item ACCOUNT entregue. A confirmationMessage do
- *                    produto também recebe os mesmos placeholders.
- * FEAT-MULTILINE: deliveryContent preserva quebras de linha (\n) no HTML.
- * FIX-BALANCE-DELIVERY: pagamento por saldo agora passa deliveryContent e
- *                        confirmationMessage retornados pela API para buildDeliveryMessage.
- * FIX-PIX-TIMER: schedulePIXExpiry agora persiste a expiração no Redis via
- *                persistPixExpiry() para sobreviver a redeploys.
+ * FIX-QTY-BOT: qty (session.pendingQty) agora é passado no createPayment.
+ * FIX-DELIVERY-BOT: bot não monta mais mensagem de entrega para BALANCE/PIX.
+ *   A API (deliveryService) já entregou o conteúdo direto ao usuário.
+ *   O bot apenas exibe confirmação simples sem repetir o conteúdo.
  */
 import { Context, Markup } from 'telegraf';
 import { apiClient } from '../services/apiClient';
@@ -37,38 +33,6 @@ function escapeMarkdownV2(text: string): string {
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
-/** Extrai um campo string opcional de qualquer objeto, sem erros de tipo. */
-function strField(obj: unknown, key: string): string | null {
-  if (obj && typeof obj === 'object' && key in (obj as object)) {
-    const val = (obj as Record<string, unknown>)[key];
-    return typeof val === 'string' ? val : null;
-  }
-  return null;
-}
-
-/**
- * Substitui placeholders {chave} pelos valores de um objeto JSON.
- * Seguro para HTML: escapa os valores antes de inserir.
- */
-function applyJsonVars(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{([^}]+)\}/g, (match, key: string) => {
-    const val = vars[key];
-    return val !== undefined ? escapeHtml(String(val)) : match;
-  });
-}
-
-function parseAccountJson(content: string): Record<string, string> | null {
-  try {
-    const obj = JSON.parse(content.trim());
-    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      const result: Record<string, string> = {};
-      for (const [k, v] of Object.entries(obj)) result[k] = String(v);
-      return result;
-    }
-  } catch {}
-  return null;
-}
-
 async function editOrReply(
   ctx: Context,
   text: string,
@@ -89,63 +53,7 @@ export function initPaymentHandlers(): void {
   // placeholder — handlers registrados no index.ts
 }
 
-// ─── Helpers de entrega ───────────────────────────────────────────────────────
-
-function buildDeliveryMessage(
-  productName: string,
-  deliveryContent?: string | null,
-  confirmationMessage?: string | null
-): string {
-  const header = `✅ <b>Pagamento confirmado!</b>\n\n📦 <b>${escapeHtml(productName)}</b>\n`;
-  const accountVars = deliveryContent ? parseAccountJson(deliveryContent.trim()) : null;
-
-  if (confirmationMessage && confirmationMessage.trim()) {
-    let msg = confirmationMessage.trim();
-    if (accountVars) {
-      msg = applyJsonVars(msg, accountVars);
-    } else {
-      msg = escapeHtml(msg);
-    }
-    const msgHtml = msg.replace(/\n/g, '\n');
-    let contentBlock = '';
-    if (deliveryContent && deliveryContent.trim()) {
-      if (accountVars) {
-        const lines = Object.entries(accountVars)
-          .map(([k, v]) => `<b>${escapeHtml(k)}:</b> <code>${escapeHtml(v)}</code>`)
-          .join('\n');
-        contentBlock = `\n\n🔑 <b>Dados da conta:</b>\n${lines}`;
-      } else {
-        contentBlock = `\n\n📄 <b>Conteúdo:</b>\n<pre>${escapeHtml(deliveryContent.trim())}</pre>`;
-      }
-    }
-    return header + `\n${msgHtml}` + contentBlock + '\n\n<i>Guarde essa mensagem em local seguro.</i>';
-  }
-
-  if (deliveryContent && deliveryContent.trim().length > 0) {
-    if (accountVars) {
-      const lines = Object.entries(accountVars)
-        .map(([k, v]) => `<b>${escapeHtml(k)}:</b> <code>${escapeHtml(v)}</code>`)
-        .join('\n');
-      return (
-        header +
-        `\n🔑 <b>Dados da conta:</b>\n${lines}\n\n` +
-        `<i>Guarde essa mensagem em local seguro.</i>`
-      );
-    }
-    return (
-      header +
-      `\n🎁 <b>Seu produto:</b>\n` +
-      `<pre>${escapeHtml(deliveryContent.trim())}</pre>\n\n` +
-      `<i>Guarde essa mensagem em local seguro.</i>`
-    );
-  }
-
-  return (
-    header +
-    `\n✔️ Seu pedido foi processado com sucesso.\n` +
-    `<i>Em caso de dúvidas, acesse /ajuda.</i>`
-  );
-}
+// ─── Helpers de teclado pós-compra ───────────────────────────────────────────
 
 function afterPurchaseKeyboard(productId?: string): ReturnType<typeof Markup.inlineKeyboard> {
   const rows: ReturnType<typeof Markup.button.callback>[][] = [];
@@ -323,12 +231,15 @@ export async function executePayment(
     const firstName     = ctx.from!.first_name;
     const username      = ctx.from!.username;
     const pendingCoupon = session.pendingCoupon ?? undefined;
+    // FIX-QTY-BOT: lê qty da sessão (selecionado na tela de quantidade)
+    const qty           = session.pendingQty ?? 1;
 
     await editOrReply(ctx, '⏳ <b>Processando pagamento...</b>', { parse_mode: 'HTML' });
 
     const payment = await apiClient.createPayment({
       telegramId: String(userId),
       productId,
+      qty,          // ← FIX: qty agora é enviado à API
       firstName,
       username,
       paymentMethod: method,
@@ -341,12 +252,16 @@ export async function executePayment(
     }
 
     if (payment.paidWithBalance) {
+      // BALANCE: a API (deliveryService) já enviou o conteúdo direto ao usuário.
+      // O bot apenas confirma o pagamento sem repetir o conteúdo.
       if (pendingCoupon) await markCouponUsed(userId, pendingCoupon);
       await clearSession(userId, firstName);
-      const deliveryContent     = strField(payment, 'deliveryContent');
-      const confirmationMessage = strField(payment, 'confirmationMessage');
+      const productName = payment.productName ?? productId;
+      const qtyLabel    = qty > 1 ? ` (${qty}x)` : '';
       await ctx.reply(
-        buildDeliveryMessage(payment.productName ?? productId, deliveryContent, confirmationMessage),
+        `✅ <b>Compra realizada com sucesso!</b>\n\n` +
+        `📦 <b>${escapeHtml(productName)}${qtyLabel}</b>\n\n` +
+        `<i>O conteúdo foi enviado na mensagem acima. Guarde em local seguro.</i>`,
         { parse_mode: 'HTML', reply_markup: afterPurchaseKeyboard(productId).reply_markup }
       );
       return;
@@ -422,12 +337,12 @@ export async function handleCheckPayment(
       cancelPIXTimer(userId);
       await clearPixExpiry(userId);
       await clearSession(userId, firstName);
-      const confirmationMessage = strField(status, 'confirmationMessage');
-      const deliveryContent     = strField(status, 'deliveryContent')
-                                    ?? (status.deliveryContent as string | undefined)
-                                    ?? null;
+      // PIX: a API (deliveryService) já entregou o conteúdo via Telegram webhook.
+      // O bot apenas confirma o pagamento sem repetir o conteúdo.
       await ctx.reply(
-        buildDeliveryMessage(status.productName ?? 'seu produto', deliveryContent, confirmationMessage),
+        `✅ <b>Pagamento confirmado!</b>\n\n` +
+        `📦 <b>${escapeHtml(status.productName ?? 'seu produto')}</b>\n\n` +
+        `<i>O conteúdo foi enviado em mensagem separada. Guarde em local seguro.</i>`,
         { parse_mode: 'HTML', reply_markup: afterPurchaseKeyboard().reply_markup }
       );
       return;
