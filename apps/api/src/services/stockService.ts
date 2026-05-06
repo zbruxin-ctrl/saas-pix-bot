@@ -1,8 +1,9 @@
 // ALTERAÇÕES:
-// FIX #1: reserveStock no path legado (stock numérico) agora usa $transaction atômica
-//         para evitar race condition entre getAvailableStock e create
+// FIX #1: reserveStock no path legado usa $transaction atômica
 // FIX #17: releaseExpiredReservations usa pixExpiresAt corretamente
-// FIX-BUILD3: reason tornado opcional em releaseReservation (TS2554)
+// FIX-BUILD3: reason tornado opcional em releaseReservation
+// FEAT-QTY: getReservedItemsForPayment retorna TODOS os StockItems de um pagamento
+//           releaseReservationQty libera N reservas de um pagamento
 import { StockItemStatus, StockReservationStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -56,7 +57,6 @@ export class StockService {
 
     const hasItems = product._count.stockItems > 0;
 
-    // PATH FIFO (StockItem) — já era atômico
     if (hasItems) {
       await prisma.$transaction(async (tx) => {
         const item = await tx.stockItem.findFirst({
@@ -78,12 +78,8 @@ export class StockService {
       return;
     }
 
-    // PATH LEGADO (stock numérico)
-    // FIX #1: envolve o check de disponibilidade e o create numa única $transaction
-    // para eliminar a race condition entre o count e o create.
     if (product.stock !== null) {
       await prisma.$transaction(async (tx) => {
-        // Conta reservas ativas dentro da transaction
         const activeReservations = await tx.stockReservation.count({
           where: {
             productId,
@@ -92,7 +88,6 @@ export class StockService {
           },
         });
 
-        // Relê o stock dentro da transaction para garantir consistência
         const prod = await tx.product.findUnique({
           where: { id: productId },
           select: { stock: true },
@@ -121,8 +116,6 @@ export class StockService {
       });
       return;
     }
-
-    // Produto ilimitado (stock === null e sem StockItems) — sem reserva necessária
   }
 
   async confirmReservation(paymentId: string): Promise<void> {
@@ -138,9 +131,6 @@ export class StockService {
         where: { id: item.id },
         data: { status: StockItemStatus.CONFIRMED, confirmedAt: new Date() },
       });
-      logger.info(
-        `[StockService] StockItem confirmado | item=${item.id} | produto=${item.productId} | pagamento=${paymentId}`
-      );
       return;
     }
 
@@ -149,18 +139,8 @@ export class StockService {
         where: { paymentId },
         include: { product: true },
       });
-      if (!reservation) {
-        logger.warn(
-          `[StockService] Nenhuma reserva encontrada para pagamento=${paymentId} — produto pode ser ilimitado`
-        );
-        return;
-      }
-      if (reservation.status !== StockReservationStatus.ACTIVE) {
-        logger.warn(
-          `[StockService] Reserva já está com status ${reservation.status} | id=${reservation.id} | pagamento=${paymentId}`
-        );
-        return;
-      }
+      if (!reservation) return;
+      if (reservation.status !== StockReservationStatus.ACTIVE) return;
       await tx.stockReservation.update({
         where: { id: reservation.id },
         data: { status: StockReservationStatus.CONFIRMED, confirmedAt: new Date() },
@@ -171,19 +151,20 @@ export class StockService {
           data: { stock: { decrement: reservation.quantity } },
         });
       }
-      logger.info(
-        `[StockService] Reserva legada confirmada | id=${reservation.id} | produto=${reservation.productId} | pagamento=${paymentId}`
-      );
     });
   }
 
   async releaseReservation(paymentId: string, reason?: string): Promise<void> {
     const resolvedReason = reason ?? 'não especificado';
-    const item = await prisma.stockItem.findUnique({ where: { paymentId } });
-    if (item) {
-      if (item.status !== StockItemStatus.RESERVED) return;
-      await prisma.stockItem.update({
-        where: { id: item.id },
+
+    // Libera TODOS os StockItems vinculados a este paymentId (suporte a qty > 1)
+    const items = await prisma.stockItem.findMany({
+      where: { paymentId, status: StockItemStatus.RESERVED },
+    });
+
+    if (items.length > 0) {
+      await prisma.stockItem.updateMany({
+        where: { paymentId, status: StockItemStatus.RESERVED },
         data: {
           status: StockItemStatus.AVAILABLE,
           paymentId: null,
@@ -192,11 +173,12 @@ export class StockService {
         },
       });
       logger.info(
-        `[StockService] StockItem liberado | item=${item.id} | produto=${item.productId} | pagamento=${paymentId} | motivo=${resolvedReason}`
+        `[StockService] ${items.length} StockItem(s) liberados | pagamento=${paymentId} | motivo=${resolvedReason}`
       );
       return;
     }
 
+    // Path legado
     const reservation = await prisma.stockReservation.findUnique({ where: { paymentId } });
     if (!reservation || reservation.status !== StockReservationStatus.ACTIVE) return;
     await prisma.stockReservation.update({
@@ -209,23 +191,41 @@ export class StockService {
   }
 
   async markDelivered(paymentId: string, orderId: string): Promise<void> {
-    const item = await prisma.stockItem.findUnique({ where: { paymentId } });
+    // Marca o StockItem relacionado ao orderId específico como entregue
+    const item = await prisma.stockItem.findFirst({
+      where: { paymentId, orderId: null, status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED] } },
+    });
     if (!item) return;
     await prisma.stockItem.update({
       where: { id: item.id },
       data: { status: StockItemStatus.DELIVERED, orderId, deliveredAt: new Date() },
     });
     logger.info(
-      `[StockService] StockItem entregue | item=${item.id} | produto=${item.productId} | pagamento=${paymentId} | pedido=${orderId}`
+      `[StockService] StockItem entregue | item=${item.id} | pagamento=${paymentId} | pedido=${orderId}`
     );
   }
 
   async getReservedItemContent(paymentId: string): Promise<string | null> {
-    const item = await prisma.stockItem.findUnique({ where: { paymentId } });
+    const item = await prisma.stockItem.findFirst({
+      where: { paymentId, status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED] } },
+      orderBy: { createdAt: 'asc' },
+    });
     return item?.content ?? null;
   }
 
-  // FIX #17: usa pixExpiresAt para payments (campo correto) + updateMany direto
+  /** FEAT-QTY: retorna o conteúdo de TODOS os StockItems reservados para um pagamento */
+  async getReservedItemsContent(paymentId: string): Promise<string[]> {
+    const items = await prisma.stockItem.findMany({
+      where: {
+        paymentId,
+        status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED] },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { content: true },
+    });
+    return items.map((i) => i.content ?? '');
+  }
+
   async releaseExpiredReservations(): Promise<number> {
     const cutoff = new Date(Date.now() - RESERVATION_TTL_MS);
 
@@ -240,9 +240,7 @@ export class StockService {
     });
 
     if (itemsResult.count > 0) {
-      logger.info(
-        `[StockService] ${itemsResult.count} StockItems expirados liberados (FIFO)`
-      );
+      logger.info(`[StockService] ${itemsResult.count} StockItems expirados liberados (FIFO)`);
     }
 
     const legacyResult = await prisma.stockReservation.updateMany({
@@ -250,9 +248,7 @@ export class StockService {
       data: { status: StockReservationStatus.RELEASED, releasedAt: new Date() },
     });
     if (legacyResult.count > 0) {
-      logger.info(
-        `[StockService] ${legacyResult.count} reservas legadas expiradas liberadas`
-      );
+      logger.info(`[StockService] ${legacyResult.count} reservas legadas expiradas liberadas`);
     }
 
     return itemsResult.count + legacyResult.count;

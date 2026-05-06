@@ -1,10 +1,9 @@
 // deliveryService.ts
-// FEAT: mensagem de confirmaçao customizável via product.metadata.confirmationMessage
-//       Variáveis: {{produto}}, {{conteudo}}
-// FIX:  primeira mídia é enviada com a mensagem como caption (acoplada).
-//       Se a mensagem ultrapassar 1024 chars (limite do Telegram),
-//       envia o texto separado primeiro e depois as mídias normalmente.
-// OPT #10: timeout de 30s em deliveryService.deliver via Promise.race
+// FEAT: mensagem de confirmação customizável via product.metadata.confirmationMessage
+// FIX: primeira mídia enviada com caption acoplada
+// OPT #10: timeout de 30s em deliver via Promise.race
+// FEAT-QTY: _deliverInternal busca todos os StockItems do pagamento e entrega N conteúdos
+//           numa única mensagem agrupada (ex: 10 licenças numa msg só)
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -14,9 +13,7 @@ import { logger } from '../lib/logger';
 const MAX_RETRIES = 3;
 const BASE_RETRY_MS = 3000;
 const MAX_RETRY_MS = 15000;
-const DELIVERY_TIMEOUT_MS = 30_000; // OPT #10
-
-/** Limite de caption do Telegram */
+const DELIVERY_TIMEOUT_MS = 30_000;
 const TELEGRAM_CAPTION_LIMIT = 1024;
 
 type MediaEntry = {
@@ -25,7 +22,6 @@ type MediaEntry = {
   caption?: string;
 };
 
-/** Monta a mensagem de entrega — aplica template customizado ou retorna fallback padrão */
 function buildConfirmationMessage(
   product: Product,
   content: string,
@@ -55,6 +51,33 @@ function buildConfirmationMessage(
   }
 }
 
+/** Constrói mensagem agrupada para compras com qty > 1 */
+function buildMultiItemMessage(product: Product, contents: string[], deliveryType: DeliveryType): string {
+  const meta = product.metadata as Record<string, unknown> | null;
+  const custom = meta?.confirmationMessage as string | undefined;
+
+  const header =
+    `✅ *Pagamento confirmado!*\n` +
+    `📦 *${product.name}* — ${contents.length} unidade(s)\n\n` +
+    `🎁 *Seu produto:*`;
+
+  const items = contents
+    .map((c, i) => `\n${contents.length > 1 ? `*${i + 1}.* ` : ''}\`${c}\``)
+    .join('');
+
+  const footer = `\n\n_Guarde essa mensagem em local seguro._`;
+
+  if (custom && custom.trim()) {
+    // Para template customizado, aplica no conteúdo concatenado
+    const joined = contents.join('\n');
+    return custom
+      .replace(/\{\{produto\}\}/g, product.name)
+      .replace(/\{\{conteudo\}\}/g, joined);
+  }
+
+  return header + items + footer;
+}
+
 async function sendMessageWithMedias(
   telegramId: string,
   message: string,
@@ -71,7 +94,7 @@ async function sendMessageWithMedias(
 
   if (messageTooBig) {
     logger.warn(
-      `Mensagem de entrega (${message.length} chars) ultrapassa limite de caption do Telegram (${TELEGRAM_CAPTION_LIMIT}). Enviando separado.`
+      `Mensagem de entrega (${message.length} chars) ultrapassa limite de caption. Enviando separado.`
     );
     await telegramService.sendMessage(telegramId, message);
     for (const media of validMedias) {
@@ -82,7 +105,6 @@ async function sendMessageWithMedias(
 
   const [first, ...rest] = validMedias;
   await sendMedia(telegramId, first, message);
-
   for (const media of rest) {
     await sendMedia(telegramId, media);
   }
@@ -129,7 +151,6 @@ async function getOrderMedias(orderId: string): Promise<MediaEntry[]> {
 
 class DeliveryService {
 
-  // OPT #10: timeout de 30s — se a entrega travar, rejeita e entra no fluxo de retry/fail
   async deliver(orderId: string, telegramUser: TelegramUser, product: Product): Promise<void> {
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`[DeliveryTimeout] Entrega do pedido ${orderId} excedeu 30s`)), DELIVERY_TIMEOUT_MS)
@@ -151,7 +172,9 @@ class DeliveryService {
 
     logger.info(`Iniciando entrega do pedido ${orderId}`);
 
-    const itemContent = await stockService.getReservedItemContent(order.paymentId);
+    // Busca o conteúdo do StockItem específico para este order/payment
+    // Busca o próximo item disponível vinculado ao paymentId que ainda não tem orderId
+    const itemContent = await stockService.getReservedItemContent(order.paymentId!);
 
     let attempt = 0;
     let lastError: string | null = null;
@@ -176,7 +199,7 @@ class DeliveryService {
           }),
         ]);
 
-        await stockService.markDelivered(order.paymentId, orderId);
+        await stockService.markDelivered(order.paymentId!, orderId);
         logger.info(`Pedido ${orderId} entregue com sucesso na tentativa ${attempt}`);
         return;
 
@@ -282,6 +305,51 @@ class DeliveryService {
       (parsedContent.instructions ? `📋 *Instruções:* ${parsedContent.instructions}\n\n` : '') +
       `⚠️ _Salve estas informações em local seguro._`
     );
+  }
+
+  /**
+   * Entrega todos os conteúdos de um pagamento numa única mensagem agrupada.
+   * Usado quando qty > 1 para não enviar N mensagens separadas.
+   */
+  async deliverAllAsOne(
+    paymentId: string,
+    telegramUser: TelegramUser,
+    product: Product,
+    orderIds: string[]
+  ): Promise<void> {
+    const contents = await stockService.getReservedItemsContent(paymentId);
+
+    if (contents.length === 0) {
+      // Produto ilimitado ou sem StockItem — usa conteúdo do produto
+      const fallback = product.deliveryContent ?? '';
+      contents.push(...Array(orderIds.length).fill(fallback));
+    }
+
+    const message = buildMultiItemMessage(product, contents, product.deliveryType);
+
+    const productMedias = getProductMedias(product);
+    await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
+
+    // Marca todos os orders como entregues
+    for (let i = 0; i < orderIds.length; i++) {
+      await prisma.$transaction([
+        prisma.order.update({
+          where: { id: orderIds[i] },
+          data: { status: 'DELIVERED', deliveredAt: new Date() },
+        }),
+        prisma.deliveryLog.create({
+          data: {
+            orderId: orderIds[i],
+            attempt: 1,
+            status: 'SUCCESS',
+            message: `Entrega agrupada (${orderIds.length} unidades)`,
+          },
+        }),
+      ]);
+      if (contents[i]) {
+        await stockService.markDelivered(paymentId, orderIds[i]);
+      }
+    }
   }
 }
 
