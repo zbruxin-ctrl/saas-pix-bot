@@ -5,6 +5,8 @@
 // FEAT-QTY: getReservedItemsContent retorna TODOS os StockItems de um pagamento
 //           releaseReservation libera N itens de um pagamento
 // FIX-QTY2: findUnique({paymentId}) → findFirst({where:{paymentId}}) pois paymentId não é mais unique
+// FIX-QTY3: getReservedItemsContent e getReservedItemContent incluem DELIVERED para não perder
+//           conteúdo quando releaseReservation corre antes da entrega terminar
 import { StockItemStatus, StockReservationStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -120,7 +122,6 @@ export class StockService {
   }
 
   async confirmReservation(paymentId: string): Promise<void> {
-    // FIX-QTY2: findFirst pois paymentId não é mais unique
     const item = await prisma.stockItem.findFirst({ where: { paymentId } });
     if (item) {
       if (item.status !== StockItemStatus.RESERVED) {
@@ -191,7 +192,6 @@ export class StockService {
   }
 
   async markDelivered(paymentId: string, orderId: string): Promise<void> {
-    // FIX-QTY2: busca o primeiro item deste pagamento que ainda não foi vinculado a um order
     const item = await prisma.stockItem.findFirst({
       where: {
         paymentId,
@@ -210,11 +210,11 @@ export class StockService {
   }
 
   async getReservedItemContent(paymentId: string): Promise<string | null> {
-    // FIX-QTY2: findFirst pois paymentId não é mais unique
+    // Inclui DELIVERED para não perder conteúdo quando release antecipa a leitura
     const item = await prisma.stockItem.findFirst({
       where: {
         paymentId,
-        status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED] },
+        status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED, StockItemStatus.DELIVERED] },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -222,10 +222,11 @@ export class StockService {
   }
 
   async getReservedItemsContent(paymentId: string): Promise<string[]> {
+    // Inclui DELIVERED para não perder conteúdo quando release antecipa a leitura
     const items = await prisma.stockItem.findMany({
       where: {
         paymentId,
-        status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED] },
+        status: { in: [StockItemStatus.RESERVED, StockItemStatus.CONFIRMED, StockItemStatus.DELIVERED] },
       },
       orderBy: { createdAt: 'asc' },
       select: { content: true },
