@@ -138,10 +138,64 @@ export async function updateProductMedias(
   } catch {}
 }
 
+// ─── Upload de mídia ─────────────────────────────────────────────────────────────────
+// Vídeos são enviados DIRETO para o Cloudinary usando assinatura temporária.
+// Imagens e arquivos continuam usando o endpoint interno da API.
+
+interface CloudinarySignature {
+  cloudName: string;
+  apiKey: string;
+  timestamp: number;
+  signature: string;
+  folder: string;
+}
+
 export async function uploadMediaFile(
   file: File,
   mediaType: ProductMedia['mediaType']
 ): Promise<string> {
+  if (mediaType === 'VIDEO') {
+    // 1. Busca a assinatura temporária na API
+    const sigRes = await api.get<ApiResponse<CloudinarySignature>>(
+      '/admin/products/upload-signature'
+    );
+    const sig = sigRes.data.data;
+    if (!sig?.cloudName || !sig?.apiKey || !sig?.signature) {
+      throw new Error('Falha ao obter assinatura do Cloudinary.');
+    }
+
+    // 2. Envia o arquivo direto para o Cloudinary
+    const form = new FormData();
+    form.append('file', file);
+    form.append('api_key', sig.apiKey);
+    form.append('timestamp', String(sig.timestamp));
+    form.append('signature', sig.signature);
+    form.append('folder', sig.folder ?? 'saas-pix');
+
+    const res = await fetch(
+      `https://api.cloudinary.com/v1_1/${sig.cloudName}/video/upload`,
+      { method: 'POST', body: form }
+    );
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Cloudinary retornou erro: ${err}`);
+    }
+
+    const json = await res.json() as { secure_url?: string; error?: { message: string } };
+
+    if (json.error?.message) {
+      throw new Error(`Cloudinary: ${json.error.message}`);
+    }
+
+    if (!json.secure_url) {
+      throw new Error('Upload falhou: URL não retornada pelo Cloudinary.');
+    }
+
+    return json.secure_url;
+  }
+
+  // IMAGE e FILE — fluxo original via API interna
   const formData = new FormData();
   formData.append('file', file);
   formData.append('mediaType', mediaType);
