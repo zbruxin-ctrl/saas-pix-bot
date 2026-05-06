@@ -10,6 +10,7 @@
 //          CouponDTO, ReferralDTO, VolumeTierDTO adicionados
 // AUDIT #13: CreatePaymentResponse tipado com todos os campos opcionais —
 //            elimina double cast `as unknown as Record<string, unknown>` em payments.ts
+// FIX-BALANCE-DELIVERY-CONTENT: deliveryContent adicionado em CreatePaymentResponse
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -271,6 +272,8 @@ export interface CreatePaymentResponse {
   isMixed?: boolean;         // true = saldo parcial + PIX pela diferença
   /** Nome do cupom aplicado (se houver) — AUDIT #13: campo tipado, sem double cast */
   couponApplied?: string;
+  /** Conteúdo de entrega do produto (preenchido quando paidWithBalance=true) */
+  deliveryContent?: string | null;
 }
 
 export interface CreateDepositRequest {
