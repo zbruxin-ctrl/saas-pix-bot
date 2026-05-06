@@ -5,6 +5,7 @@
 // FEAT #1: POST /:productId/stock-items/bulk — upload em lote (textarea/CSV)
 // CACHE: notifyBotProductCacheInvalidation() após create/update/delete/reorder
 // FIX CARD: GET / inclui _count.stockItems para exibir disponíveis sem fetch extra
+// FEAT #2: GET /upload-signature — assina upload direto ao Cloudinary (evita 413 no Railway)
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { Prisma, StockItemStatus } from '@prisma/client';
@@ -124,7 +125,48 @@ async function syncFifoItems(
   return true;
 }
 
-// ─── Upload ───────────────────────────────────────────────────────────────────
+// ─── GET /upload-signature — Assina upload direto ao Cloudinary (FEAT #2) ────
+// O painel usa esta assinatura para enviar arquivos diretamente ao Cloudinary,
+// evitando que o binário passe pela API do Railway (causa 413).
+
+adminProductsRouter.get(
+  '/upload-signature',
+  requireRole('ADMIN', 'SUPERADMIN'),
+  async (_req: AuthenticatedRequest, res: Response) => {
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+
+    if (!apiKey || !apiSecret || !cloudName) {
+      res.status(500).json({ success: false, error: 'Cloudinary não configurado (verifique CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET e CLOUDINARY_CLOUD_NAME no Railway)' });
+      return;
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { v2: cloudinary } = require('cloudinary');
+      const timestamp = Math.round(Date.now() / 1000);
+      const paramsToSign = { timestamp, folder: 'saas-pix' };
+      const signature = cloudinary.utils.api_sign_request(paramsToSign, apiSecret);
+
+      res.json({
+        success: true,
+        data: {
+          timestamp,
+          signature,
+          apiKey,
+          cloudName,
+          folder: 'saas-pix',
+        },
+      });
+    } catch (err) {
+      logger.error('[adminProducts] Erro ao gerar assinatura Cloudinary:', err);
+      res.status(500).json({ success: false, error: 'Erro ao gerar assinatura' });
+    }
+  }
+);
+
+// ─── Upload (fallback para imagens pequenas via API) ──────────────────────────
 
 adminProductsRouter.post(
   '/upload',
