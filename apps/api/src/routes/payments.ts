@@ -25,6 +25,10 @@
 // FIX-DELIVERY-READY: ready=true somente quando TODOS os itens (payment.qty) estão DELIVERED.
 //   Antes: ready=true com 1 item — bot exibia apenas 1 item em pedidos com qty>1.
 // FIX-BUILD: campo correto é `qty` (não `quantity`) no model Payment do Prisma.
+// FIX-CANCEL-ERROR-FIELD: POST /:id/cancel usava campo `message` em respostas de erro 400/403.
+//   O interceptor Axios do bot só lê `response.data.error` — resultado: a mensagem real
+//   se perdia e o bot mostrava genérico 'Erro ao cancelar pagamento.'.
+//   Corrigido: todas as respostas de erro do endpoint agora usam o campo `error`.
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -373,6 +377,8 @@ paymentsRouter.get(
 // ─── Rotas dinâmicas DEPOIS das estáticas ─────────────────────────────────────────────────────
 
 // POST /api/payments/:id/cancel
+// FIX-CANCEL-ERROR-FIELD: respostas de erro usam campo `error` (padrão da API),
+//   não `message`. O interceptor Axios do bot lê só `response.data.error`.
 paymentsRouter.post(
   '/:id/cancel',
   requireBotSecret,
@@ -394,7 +400,8 @@ paymentsRouter.post(
 
     const result = await paymentService.cancelPayment(id);
     if (!result.cancelled) {
-      res.status(400).json({ success: false, message: result.message });
+      // FIX-CANCEL-ERROR-FIELD: era `message`, agora é `error` para o interceptor Axios extrair corretamente
+      res.status(400).json({ success: false, error: result.message });
       return;
     }
     logger.info(`Pagamento ${id} cancelado via bot (telegramId: ${telegramId})`);
