@@ -12,6 +12,10 @@
 //            via Promise.all — seguro pois markDelivered agora usa $transaction atômica
 // FIX-POOL2: deliverAllAsOne de volta a sequencial para não esgotar pool do Neon
 //            (Promise.all com 6 orders abria 12 transações simultâneas → timeout)
+// FIX-SEND-THEN-MARK: deliverAllAsOne envolve o envio Telegram em try/catch.
+//   Se o envio falhar (ex: Markdown inválido → fallback texto puro → ainda 400),
+//   a entrega no banco (DELIVERED + markDelivered) ocorre mesmo assim.
+//   Itens nunca são liberados de volta ao estoque por causa de erro de formatação.
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -324,10 +328,13 @@ class DeliveryService {
 
   /**
    * Entrega todos os conteúdos de um pagamento numa única mensagem agrupada.
-   * FIX-POOL2: registra cada order SEQUENCIALMENTE após enviar a mensagem,
-   * para não esgotar o pool de conexões do Neon com transações simultâneas.
-   * A mensagem ao Telegram é enviada primeiro (1 request) e só então
-   * o banco é atualizado order por order.
+   * FIX-POOL2: registra cada order SEQUENCIALMENTE após enviar a mensagem.
+   * FIX-SEND-THEN-MARK: envolve o envio Telegram em try/catch separado.
+   *   Se o Telegram retornar 400 (ex: Markdown inválido), o bot WhatsApp
+   *   ainda entregará os itens via polling de delivered-items.
+   *   O banco SEMPRE é atualizado (DELIVERED + markDelivered) independente
+   *   do resultado do envio Telegram — itens nunca voltam ao estoque
+   *   por causa de erro de formatação de mensagem.
    */
   async deliverAllAsOne(
     paymentId: string,
@@ -345,10 +352,24 @@ class DeliveryService {
     const message = buildMultiItemMessage(product, contents, product.deliveryType);
     const productMedias = getProductMedias(product);
 
-    // Envia a mensagem PRIMEIRO (1 request ao Telegram)
-    await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
+    // FIX-SEND-THEN-MARK: envia mensagem ao Telegram mas NÃO aborta se falhar.
+    // O WhatsApp bot busca os itens via GET /delivered-items (polling), portanto
+    // a entrega no banco é o que importa — o envio Telegram é best-effort.
+    let telegramSendError: unknown = null;
+    try {
+      await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
+    } catch (err) {
+      telegramSendError = err;
+      logger.warn(
+        `[deliverAllAsOne] Envio Telegram falhou para pagamento=${paymentId} — ` +
+        `continuando para marcar itens como DELIVERED no banco. Erro: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
 
-    // FIX-POOL2: registra cada order SEQUENCIALMENTE para não esgotar pool do Neon
+    // FIX-POOL2: registra cada order SEQUENCIALMENTE para não esgotar pool do Neon.
+    // Esta etapa SEMPRE ocorre, independente do resultado do envio acima.
     for (let i = 0; i < orderIds.length; i++) {
       const orderId = orderIds[i];
       await prisma.$transaction([
@@ -361,7 +382,11 @@ class DeliveryService {
             orderId,
             attempt: 1,
             status: 'SUCCESS',
-            message: `Entrega agrupada (${orderIds.length} unidades)`,
+            message: telegramSendError
+              ? `Entrega agrupada (${orderIds.length} unidades) — envio Telegram falhou: ${
+                  telegramSendError instanceof Error ? telegramSendError.message : String(telegramSendError)
+                }`
+              : `Entrega agrupada (${orderIds.length} unidades)`,
           },
         }),
       ]);
