@@ -3,6 +3,7 @@
 // FEAT: GET /export/csv — exporta pagamentos aprovados em CSV
 // FEAT: POST /:id/cancel — cancela pagamento PENDING no MP e no banco
 // FIX-QTY: order → orders (1 payment → N orders); stockItem via findFirst
+// FIX-BUILD: processApprovedPayment renomeado para confirmApproval no paymentService.
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentStatus, OrderStatus, Prisma } from '@prisma/client';
@@ -280,7 +281,8 @@ adminPaymentsRouter.post(
     }
 
     try {
-      await paymentService.processApprovedPayment(paymentId);
+      // FIX-BUILD: método renomeado de processApprovedPayment para confirmApproval
+      await paymentService.confirmApproval(paymentId);
     } catch (err: any) {
       res.status(500).json({ success: false, error: `Erro ao processar pagamento: ${err?.message || 'erro desconhecido'}` });
       return;
