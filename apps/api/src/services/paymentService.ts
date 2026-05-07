@@ -12,6 +12,8 @@
 // FIX-BOT-SOURCE: botSource salvo no Payment e repassado ao deliverAllAsOne
 //   'telegram' (ou null) → tenta enviar mensagem via Telegram antes de marcar entregue
 //   'whatsapp'           → pula envio Telegram; bot busca conteúdo via GET /delivered-items
+// FIX-POOL2: createOrdersOnly agora também é sequencial (Promise.all causava
+//            'Unable to start a transaction in the given time' no Neon em qty > 1)
 import { PaymentStatus, OrderStatus, StockItemStatus, WalletTransactionType } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -70,8 +72,12 @@ async function reserveAndCreateOrders(
 }
 
 /**
- * Cria N orders, SEM reservar StockItems.
- * Usado em confirmApproval de pagamentos PIX/MIXED.
+ * Cria N orders SEQUENCIALMENTE, SEM reservar StockItems.
+ * Usado em confirmApproval de pagamentos PIX/MIXED e entrega BALANCE background.
+ *
+ * FIX-POOL2: era Promise.all — abria N conexões simultâneas no Neon causando
+ * "Unable to start a transaction in the given time" em qty > 1.
+ * Agora usa loop for...of idêntico ao reserveStockSequential.
  */
 async function createOrdersOnly(
   telegramUserId: string,
@@ -79,20 +85,20 @@ async function createOrdersOnly(
   qty: number,
   paymentId: string
 ): Promise<string[]> {
-  const orders = await Promise.all(
-    Array.from({ length: qty }, () =>
-      prisma.order.create({
-        data: {
-          telegramUserId,
-          paymentId,
-          productId: product.id,
-          status: OrderStatus.PROCESSING,
-        },
-        select: { id: true },
-      })
-    )
-  );
-  return orders.map((o) => o.id);
+  const orderIds: string[] = [];
+  for (let i = 0; i < qty; i++) {
+    const order = await prisma.order.create({
+      data: {
+        telegramUserId,
+        paymentId,
+        productId: product.id,
+        status: OrderStatus.PROCESSING,
+      },
+      select: { id: true },
+    });
+    orderIds.push(order.id);
+  }
+  return orderIds;
 }
 
 /**
