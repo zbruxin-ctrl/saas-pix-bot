@@ -15,7 +15,9 @@
 // FIX-SEND-THEN-MARK: deliverAllAsOne envolve o envio Telegram em try/catch.
 //   Se o envio falhar (ex: Markdown inválido → fallback texto puro → ainda 400),
 //   a entrega no banco (DELIVERED + markDelivered) ocorre mesmo assim.
-//   Itens nunca são liberados de volta ao estoque por causa de erro de formatação.
+// FIX-BOT-SOURCE: deliver e deliverAllAsOne recebem botSource ('telegram' | 'whatsapp').
+//   'whatsapp' → pula envio Telegram completamente (zero requests ao bot Telegram).
+//   'telegram' / undefined → comportamento padrão (tenta enviar, fallback texto puro).
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -162,18 +164,32 @@ async function getOrderMedias(orderId: string): Promise<MediaEntry[]> {
 
 class DeliveryService {
 
-  async deliver(orderId: string, telegramUser: TelegramUser, product: Product): Promise<void> {
+  /**
+   * FIX-BOT-SOURCE: botSource opcional (padrão = 'telegram').
+   * Para WhatsApp, pula o envio Telegram e marca diretamente como DELIVERED.
+   */
+  async deliver(
+    orderId: string,
+    telegramUser: TelegramUser,
+    product: Product,
+    botSource: 'telegram' | 'whatsapp' = 'telegram'
+  ): Promise<void> {
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`[DeliveryTimeout] Entrega do pedido ${orderId} excedeu 30s`)), DELIVERY_TIMEOUT_MS)
     );
 
     return Promise.race([
-      this._deliverInternal(orderId, telegramUser, product),
+      this._deliverInternal(orderId, telegramUser, product, botSource),
       timeoutPromise,
     ]);
   }
 
-  private async _deliverInternal(orderId: string, telegramUser: TelegramUser, product: Product): Promise<void> {
+  private async _deliverInternal(
+    orderId: string,
+    telegramUser: TelegramUser,
+    product: Product,
+    botSource: 'telegram' | 'whatsapp'
+  ): Promise<void> {
     const order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new Error(`Pedido ${orderId} não encontrado`);
     if (order.status === 'DELIVERED') {
@@ -181,9 +197,8 @@ class DeliveryService {
       return;
     }
 
-    logger.info(`Iniciando entrega do pedido ${orderId}`);
+    logger.info(`Iniciando entrega do pedido ${orderId} [botSource=${botSource}]`);
 
-    // FIX-QTY4: busca o próximo StockItem vinculado ao paymentId que ainda NÃO tem orderId
     const nextItem = await prisma.stockItem.findFirst({
       where: {
         paymentId: order.paymentId!,
@@ -195,6 +210,28 @@ class DeliveryService {
     });
     const itemContent = nextItem?.content ?? null;
 
+    // FIX-BOT-SOURCE: WhatsApp — pula envio Telegram, marca direto como DELIVERED
+    if (botSource === 'whatsapp') {
+      await prisma.$transaction([
+        prisma.order.update({
+          where: { id: orderId },
+          data: { status: 'DELIVERED', deliveredAt: new Date() },
+        }),
+        prisma.deliveryLog.create({
+          data: {
+            orderId,
+            attempt: 1,
+            status: 'SUCCESS',
+            message: `Entrega via WhatsApp bot — conteúdo disponível em GET /delivered-items`,
+          },
+        }),
+      ]);
+      await stockService.markDelivered(order.paymentId!, orderId);
+      logger.info(`Pedido ${orderId} marcado como DELIVERED (WhatsApp polling)`);
+      return;
+    }
+
+    // Fluxo Telegram: tenta enviar com retries
     let attempt = 0;
     let lastError: string | null = null;
 
@@ -328,19 +365,16 @@ class DeliveryService {
 
   /**
    * Entrega todos os conteúdos de um pagamento numa única mensagem agrupada.
-   * FIX-POOL2: registra cada order SEQUENCIALMENTE após enviar a mensagem.
-   * FIX-SEND-THEN-MARK: envolve o envio Telegram em try/catch separado.
-   *   Se o Telegram retornar 400 (ex: Markdown inválido), o bot WhatsApp
-   *   ainda entregará os itens via polling de delivered-items.
-   *   O banco SEMPRE é atualizado (DELIVERED + markDelivered) independente
-   *   do resultado do envio Telegram — itens nunca voltam ao estoque
-   *   por causa de erro de formatação de mensagem.
+   * FIX-BOT-SOURCE: se botSource = 'whatsapp', pula o envio Telegram completamente.
+   *   O banco é SEMPRE atualizado (DELIVERED + markDelivered), independente da origem.
+   *   Bot WhatsApp busca os itens via GET /delivered-items (polling).
    */
   async deliverAllAsOne(
     paymentId: string,
     telegramUser: TelegramUser,
     product: Product,
-    orderIds: string[]
+    orderIds: string[],
+    botSource: 'telegram' | 'whatsapp' = 'telegram'
   ): Promise<void> {
     let contents = await stockService.getReservedItemsContent(paymentId);
 
@@ -349,27 +383,31 @@ class DeliveryService {
       contents = Array(orderIds.length).fill(fallback) as string[];
     }
 
-    const message = buildMultiItemMessage(product, contents, product.deliveryType);
-    const productMedias = getProductMedias(product);
+    // FIX-BOT-SOURCE: WhatsApp — não envia nada ao Telegram, só marca no banco
+    if (botSource !== 'whatsapp') {
+      const message = buildMultiItemMessage(product, contents, product.deliveryType);
+      const productMedias = getProductMedias(product);
 
-    // FIX-SEND-THEN-MARK: envia mensagem ao Telegram mas NÃO aborta se falhar.
-    // O WhatsApp bot busca os itens via GET /delivered-items (polling), portanto
-    // a entrega no banco é o que importa — o envio Telegram é best-effort.
-    let telegramSendError: unknown = null;
-    try {
-      await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
-    } catch (err) {
-      telegramSendError = err;
-      logger.warn(
-        `[deliverAllAsOne] Envio Telegram falhou para pagamento=${paymentId} — ` +
-        `continuando para marcar itens como DELIVERED no banco. Erro: ${
-          err instanceof Error ? err.message : String(err)
-        }`
+      // FIX-SEND-THEN-MARK: falha de envio Telegram não aborta a entrega no banco
+      try {
+        await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
+      } catch (err) {
+        logger.warn(
+          `[deliverAllAsOne] Envio Telegram falhou para pagamento=${paymentId} — ` +
+          `continuando para marcar itens como DELIVERED no banco. Erro: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    } else {
+      logger.info(
+        `[deliverAllAsOne] botSource=whatsapp | pagamento=${paymentId} — ` +
+        `pulando envio Telegram, itens disponíveis via GET /delivered-items`
       );
     }
 
     // FIX-POOL2: registra cada order SEQUENCIALMENTE para não esgotar pool do Neon.
-    // Esta etapa SEMPRE ocorre, independente do resultado do envio acima.
+    // Esta etapa SEMPRE ocorre, independente do botSource ou resultado do envio.
     for (let i = 0; i < orderIds.length; i++) {
       const orderId = orderIds[i];
       await prisma.$transaction([
@@ -382,10 +420,8 @@ class DeliveryService {
             orderId,
             attempt: 1,
             status: 'SUCCESS',
-            message: telegramSendError
-              ? `Entrega agrupada (${orderIds.length} unidades) — envio Telegram falhou: ${
-                  telegramSendError instanceof Error ? telegramSendError.message : String(telegramSendError)
-                }`
+            message: botSource === 'whatsapp'
+              ? `Entrega via WhatsApp bot (${orderIds.length} unidades) — conteúdo via GET /delivered-items`
               : `Entrega agrupada (${orderIds.length} unidades)`,
           },
         }),

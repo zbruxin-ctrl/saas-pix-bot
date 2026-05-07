@@ -6,6 +6,7 @@
 // FEAT: Coupon, CouponUse, Referral, VolumeTier adicionados
 // FIX-BUILD: REFERRAL_REWARD adicionado ao WalletTransactionType
 // FEAT-QTY: qty adicionado ao Payment; @unique removido de Order.paymentId e StockItem.paymentId
+// FIX-BOT-SOURCE: botSource String? adicionado ao Payment para diferenciar Telegram x WhatsApp
 generator client {
   provider = "prisma-client-js"
 }
@@ -228,6 +229,9 @@ model Payment {
   paymentMethod  PaymentMethod?
   balanceUsed    Decimal?       @db.Decimal(10, 2)
   pixAmount      Decimal?       @db.Decimal(10, 2)
+  // FIX-BOT-SOURCE: identifica qual bot originou o pagamento ('telegram' | 'whatsapp')
+  // NULL = retrocompatível, tratado como 'telegram'
+  botSource      String?
   // Pricing fields
   couponId       String?
   discountAmount Decimal?       @db.Decimal(10, 2)

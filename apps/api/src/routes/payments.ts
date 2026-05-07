@@ -20,6 +20,8 @@
 // FIX-ROUTES: createDepositPayment → createDeposit; cancelPayment result.reason → result.message
 // FIX-QTY-SCHEMA: quantity adicionado ao createPaymentSchema (era descartado pelo Zod)
 // FIX-DELIVERY-ITEMS: GET /:id/delivered-items retorna conteudo real dos StockItems entregues
+// FIX-BOT-SOURCE: botSource adicionado ao createPaymentSchema ('telegram' | 'whatsapp')
+//   Permite que a API saiba qual bot originou o pagamento e ajuste o comportamento de entrega.
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -41,6 +43,11 @@ const createPaymentSchema = z.object({
   paymentMethod: z.string().optional(),
   couponCode: z.string().optional(),
   referralCode: z.string().optional(),
+  // FIX-BOT-SOURCE: qual bot originou este pagamento
+  // 'telegram' → entrega via mensagem Telegram (comportamento padrão)
+  // 'whatsapp' → entrega via polling GET /delivered-items (não envia msg Telegram)
+  // ausente/null → retrocompatível, tratado como 'telegram'
+  botSource: z.enum(['telegram', 'whatsapp']).optional(),
 });
 
 const createDepositSchema = z.object({
@@ -157,9 +164,11 @@ paymentsRouter.post(
       return;
     }
     // FIX-QTY-SCHEMA: repassa quantity como qty para o service
+    // FIX-BOT-SOURCE: repassa botSource para o service
     const result = await paymentService.createPayment({
       ...data,
       qty: data.quantity,
+      botSource: data.botSource,
     });
     logger.info(`Pagamento criado via API: ${result.paymentId}`);
     res.status(201).json({ success: true, data: result });
