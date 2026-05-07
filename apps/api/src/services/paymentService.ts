@@ -14,6 +14,12 @@
 //   'whatsapp'           → pula envio Telegram; bot busca conteúdo via GET /delivered-items
 // FIX-POOL2: createOrdersOnly agora também é sequencial (Promise.all causava
 //            'Unable to start a transaction in the given time' no Neon em qty > 1)
+// FIX-POOL3: delay de 1s no início do setImmediate do _payWithBalance.
+//   O setImmediate disparava reserveAndCreateOrders imediatamente após
+//   a transação principal, competindo com o polling do bot (GET /delivered-items
+//   a cada 5s) pelo pool do Neon e causando timeout de transação.
+//   Com 1s de espera o pool fecha a conexão anterior antes de iniciar as
+//   N transações sequenciais de reserva + order + deliver.
 import { PaymentStatus, OrderStatus, StockItemStatus, WalletTransactionType } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -34,6 +40,10 @@ type ProductSnap = {
 
 const statusCacheTTL = 5_000;
 const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function revertCoupon(paymentId: string): Promise<void> {
   try {
@@ -193,13 +203,13 @@ export const paymentService = {
     const resolvedBotSource = botSource ?? 'telegram';
 
     // FIX-TIMEOUT1: reservas + entrega rodam em BACKGROUND via setImmediate
+    // FIX-POOL3: aguarda 1s antes de iniciar para o pool fechar a transação acima
     setImmediate(async () => {
       try {
+        await sleep(1_000);
         const orderIds = await reserveAndCreateOrders(telegramUserId, product, qty, paymentId);
         const telegramUser = await prisma.telegramUser.findUniqueOrThrow({ where: { id: telegramUserId } });
         const productFull  = await prisma.product.findUniqueOrThrow({ where: { id: product.id } });
-        // FIX-BOT-SOURCE: repassa botSource para que deliverAllAsOne saiba se deve ou não
-        // tentar enviar via Telegram
         await deliverOrders(paymentId, orderIds, telegramUser, productFull, resolvedBotSource);
       } catch (err) {
         logger.error(`[_payWithBalance] Erro na entrega background | pagamento=${paymentId}:`, err);
