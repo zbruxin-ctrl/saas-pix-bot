@@ -20,6 +20,9 @@
 //   a cada 5s) pelo pool do Neon e causando timeout de transação.
 //   Com 1s de espera o pool fecha a conexão anterior antes de iniciar as
 //   N transações sequenciais de reserva + order + deliver.
+// FIX-UNIQUE-MPID: captura P2002 em _payWithPix/_payWithMixed/createDeposit e
+//   lança AppError 409 em vez de crashar. O MP pode retornar o mesmo ID quando
+//   detecta pagamentos duplicados (retry automático do bot ou double-tap do user).
 import { PaymentStatus, OrderStatus, StockItemStatus, WalletTransactionType } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { mercadoPagoService } from './mercadoPagoService';
@@ -43,6 +46,15 @@ const statusCache = new Map<string, { status: PaymentStatus; expiresAt: number }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Detecta erro de unique constraint do Prisma (P2002). */
+function isUniqueConstraintError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: string }).code === 'P2002'
+  );
 }
 
 async function revertCoupon(paymentId: string): Promise<void> {
@@ -303,23 +315,45 @@ export const paymentService = {
       });
 
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-      const payment = await prisma.payment.create({
-        data: {
-          telegramUserId,
-          productId: product.id,
-          amount,
-          qty,
-          status: PaymentStatus.PENDING,
-          paymentMethod: 'PIX',
-          mercadoPagoId: String(mpPayment.id),
-          pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
-          pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
-          pixExpiresAt: expiresAt,
-          couponId: couponId ?? null,
-          // FIX-BOT-SOURCE: persiste a origem do bot
-          botSource: botSource ?? null,
-        },
-      });
+      let payment;
+      try {
+        payment = await prisma.payment.create({
+          data: {
+            telegramUserId,
+            productId: product.id,
+            amount,
+            qty,
+            status: PaymentStatus.PENDING,
+            paymentMethod: 'PIX',
+            mercadoPagoId: String(mpPayment.id),
+            pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
+            pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
+            pixExpiresAt: expiresAt,
+            couponId: couponId ?? null,
+            // FIX-BOT-SOURCE: persiste a origem do bot
+            botSource: botSource ?? null,
+          },
+        });
+      } catch (createErr) {
+        // FIX-UNIQUE-MPID: MP pode retornar o mesmo ID em pagamentos duplicados.
+        // Nesse caso, retornamos o pagamento já existente em vez de crashar.
+        if (isUniqueConstraintError(createErr)) {
+          logger.warn(`[_payWithPix] mercadoPagoId=${mpPayment.id} já existe — retornando payment existente`);
+          const existing = await prisma.payment.findUnique({
+            where: { mercadoPagoId: String(mpPayment.id) },
+          });
+          if (!existing) throw new AppError('Pagamento duplicado. Tente novamente.', 409);
+          return {
+            paymentId: existing.id,
+            pixQrCode: existing.pixQrCode ?? '',
+            pixQrCodeText: existing.pixQrCodeText ?? '',
+            amount,
+            expiresAt: (existing.pixExpiresAt ?? expiresAt).toISOString(),
+            productName: qty > 1 ? `${product.name} x${qty}` : product.name,
+          };
+        }
+        throw createErr;
+      }
 
       paymentId = payment.id;
       await reserveStockSequential(product.id, telegramUserId, paymentId, qty);
@@ -394,25 +428,48 @@ export const paymentService = {
       });
 
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-      const payment = await prisma.payment.create({
-        data: {
-          telegramUserId,
-          productId: product.id,
-          amount: totalAmount,
-          qty,
-          pixAmount,
-          balanceUsed: balanceAmount,
-          status: PaymentStatus.PENDING,
-          paymentMethod: 'MIXED',
-          mercadoPagoId: String(mpPayment.id),
-          pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
-          pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
-          pixExpiresAt: expiresAt,
-          couponId: couponId ?? null,
-          // FIX-BOT-SOURCE: persiste a origem do bot
-          botSource: botSource ?? null,
-        },
-      });
+      let payment;
+      try {
+        payment = await prisma.payment.create({
+          data: {
+            telegramUserId,
+            productId: product.id,
+            amount: totalAmount,
+            qty,
+            pixAmount,
+            balanceUsed: balanceAmount,
+            status: PaymentStatus.PENDING,
+            paymentMethod: 'MIXED',
+            mercadoPagoId: String(mpPayment.id),
+            pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
+            pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
+            pixExpiresAt: expiresAt,
+            couponId: couponId ?? null,
+            // FIX-BOT-SOURCE: persiste a origem do bot
+            botSource: botSource ?? null,
+          },
+        });
+      } catch (createErr) {
+        // FIX-UNIQUE-MPID: MP pode retornar o mesmo ID em pagamentos duplicados.
+        if (isUniqueConstraintError(createErr)) {
+          logger.warn(`[_payWithMixed] mercadoPagoId=${mpPayment.id} já existe — retornando payment existente`);
+          const existing = await prisma.payment.findUnique({
+            where: { mercadoPagoId: String(mpPayment.id) },
+          });
+          if (!existing) throw new AppError('Pagamento duplicado. Tente novamente.', 409);
+          return {
+            paymentId: existing.id,
+            pixQrCode: existing.pixQrCode ?? '',
+            pixQrCodeText: existing.pixQrCodeText ?? '',
+            amount: totalAmount,
+            pixAmount,
+            balanceUsed: balanceAmount,
+            expiresAt: (existing.pixExpiresAt ?? expiresAt).toISOString(),
+            productName: qty > 1 ? `${product.name} x${qty}` : product.name,
+          };
+        }
+        throw createErr;
+      }
 
       paymentId = payment.id;
       await reserveStockSequential(product.id, telegramUserId, paymentId, qty);
@@ -538,19 +595,39 @@ export const paymentService = {
     });
 
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-    const payment = await prisma.payment.create({
-      data: {
-        telegramUserId: user.id,
-        productId: null,
-        amount,
-        status: PaymentStatus.PENDING,
-        paymentMethod: 'PIX',
-        mercadoPagoId: String(mpPayment.id),
-        pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
-        pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
-        pixExpiresAt: expiresAt,
-      },
-    });
+    let payment;
+    try {
+      payment = await prisma.payment.create({
+        data: {
+          telegramUserId: user.id,
+          productId: null,
+          amount,
+          status: PaymentStatus.PENDING,
+          paymentMethod: 'PIX',
+          mercadoPagoId: String(mpPayment.id),
+          pixQrCode: mpPayment.point_of_interaction?.transaction_data?.qr_code_base64 ?? '',
+          pixQrCodeText: mpPayment.point_of_interaction?.transaction_data?.qr_code ?? '',
+          pixExpiresAt: expiresAt,
+        },
+      });
+    } catch (createErr) {
+      // FIX-UNIQUE-MPID: MP pode retornar o mesmo ID em pagamentos duplicados.
+      if (isUniqueConstraintError(createErr)) {
+        logger.warn(`[createDeposit] mercadoPagoId=${mpPayment.id} já existe — retornando payment existente`);
+        const existing = await prisma.payment.findUnique({
+          where: { mercadoPagoId: String(mpPayment.id) },
+        });
+        if (!existing) throw new AppError('Depósito duplicado. Tente novamente.', 409);
+        return {
+          paymentId: existing.id,
+          pixQrCode: existing.pixQrCode ?? '',
+          pixQrCodeText: existing.pixQrCodeText ?? '',
+          amount,
+          expiresAt: (existing.pixExpiresAt ?? expiresAt).toISOString(),
+        };
+      }
+      throw createErr;
+    }
 
     return {
       paymentId: payment.id,
