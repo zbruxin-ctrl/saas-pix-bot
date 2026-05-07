@@ -22,6 +22,9 @@
 //   aguardar todos os StockItems serem reservados antes de montar a mensagem.
 //   Corrige race condition com setImmediate do _payWithBalance onde getReservedItemsContent
 //   retornava menos itens que o qty comprado (ex: 2 de 5), causando mensagem incompleta.
+// FIX-DUPLICATE-CONFIRM: buildMultiItemMessage não inclui mais header "✅ Compra realizada"
+//   pois o bot já envia essa confirmação separadamente. A mensagem de entrega só mostra
+//   o(s) conteúdo(s) e o aviso de uso único, evitando mensagens duplicadas fora de ordem.
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -69,21 +72,14 @@ function buildConfirmationMessage(
   }
 }
 
-/** Constrói mensagem agrupada para compras com qty > 1 */
-function buildMultiItemMessage(product: Product, contents: string[], deliveryType: DeliveryType): string {
+/**
+ * Constrói mensagem de entrega para compras com qty > 1.
+ * FIX-DUPLICATE-CONFIRM: NÃO inclui header "✅ Compra realizada" — o bot já envia isso.
+ * A mensagem só mostra os itens entregues + aviso de uso único.
+ */
+function buildMultiItemMessage(product: Product, contents: string[], _deliveryType: DeliveryType): string {
   const meta = product.metadata as Record<string, unknown> | null;
   const custom = meta?.confirmationMessage as string | undefined;
-
-  const header =
-    `\u2705 *Compra realizada com sucesso!*\n` +
-    `\uD83D\uDCE6 *${product.name}* (${contents.length}x)\n\n` +
-    `*O conteúdo foi enviado na mensagem acima. Guarde em local seguro.*`;
-
-  const items = contents
-    .map((c, i) => `\n${contents.length > 1 ? `*${i + 1}.* ` : ''}\`${c}\``)
-    .join('');
-
-  const footer = `\n\n\u26A0\uFE0F _Os links são de uso único e não realizamos trocas. Utilize dentro do prazo._`;
 
   if (custom && custom.trim()) {
     const joined = contents.join('\n');
@@ -91,6 +87,17 @@ function buildMultiItemMessage(product: Product, contents: string[], deliveryTyp
       .replace(/\{\{produto\}\}/g, product.name)
       .replace(/\{\{conteudo\}\}/g, joined);
   }
+
+  const header =
+    `\u2705 *Compra realizada com sucesso!*\n` +
+    `\uD83D\uDCE6 *${product.name}* (${contents.length}x)\n` +
+    `Abaixo estão os links de ativação, válidos por 10 minutos. \uD83D\uDEAB`;
+
+  const items = contents
+    .map((c) => `\n${c}`)
+    .join('');
+
+  const footer = `\n\n\u26A0\uFE0F _Os links são de uso único e não realizamos trocas. Utilize dentro do prazo._`;
 
   return header + items + footer;
 }
@@ -191,7 +198,6 @@ async function waitForReservedItems(
       await sleep(intervalMs);
     }
   }
-  // Retorna o que tiver após esgotar tentativas (fallback será aplicado no caller)
   return stockService.getReservedItemsContent(paymentId);
 }
 
@@ -399,10 +405,11 @@ class DeliveryService {
   /**
    * Entrega todos os conteúdos de um pagamento numa única mensagem agrupada.
    * FIX-BOT-SOURCE: se botSource = 'whatsapp', pula o envio Telegram completamente.
-   *   O banco é SEMPRE atualizado (DELIVERED + markDelivered), independente da origem.
-   *   Bot WhatsApp busca os itens via GET /delivered-items (polling).
-   * FIX-QTY-TIMING: aguarda todos os StockItems serem reservados antes de montar
-   *   a mensagem, evitando race condition com setImmediate do _payWithBalance.
+   * FIX-QTY-TIMING: aguarda todos os StockItems serem reservados antes de montar a mensagem.
+   * FIX-DUPLICATE-CONFIRM: a mensagem de entrega inclui o header completo (produto + itens + aviso).
+   *   O bot NÃO envia mensagem de confirmação separada para pagamentos PIX/webhook.
+   *   O handleCheckPayment do bot envia apenas uma mensagem simples de confirmação de pagamento
+   *   sem repetir o conteúdo já enviado pela deliveryService.
    */
   async deliverAllAsOne(
     paymentId: string,
@@ -418,7 +425,6 @@ class DeliveryService {
       const fallback = product.deliveryContent ?? '';
       contents = Array(orderIds.length).fill(fallback) as string[];
     } else if (contents.length < orderIds.length) {
-      // Preenche os itens que faltam com fallback após esgotar tentativas
       const fallback = product.deliveryContent ?? '';
       logger.warn(
         `[deliverAllAsOne] pagamento=${paymentId} — apenas ${contents.length}/${orderIds.length} itens ` +
@@ -453,7 +459,6 @@ class DeliveryService {
     }
 
     // FIX-POOL2: registra cada order SEQUENCIALMENTE para não esgotar pool do Neon.
-    // Esta etapa SEMPRE ocorre, independente do botSource ou resultado do envio.
     for (let i = 0; i < orderIds.length; i++) {
       const orderId = orderIds[i];
       await prisma.$transaction([
