@@ -9,9 +9,10 @@
  * FIX-DELIVERY-BOT: bot não monta mais mensagem de entrega para BALANCE/PIX.
  *   A API (deliveryService) já entregou o conteúdo direto ao usuário.
  *   O bot apenas exibe confirmação simples sem repetir o conteúdo.
- * FIX-CANCEL-EDIT: handleCancelPayment agora edita a mensagem do QR Code
- *   (remove botões e mostra status cancelado) em vez de só enviar nova mensagem.
- *   Antes o QR ficava visualmente ativo mesmo após o cancelamento.
+ * FIX-CANCEL-EDIT: handleCancelPayment edita a mensagem do QR Code (remove botões)
+ *   em vez de só enviar nova mensagem.
+ * FIX-CANCEL-CODE-MSG: salva pixCodeMessageId na session e deleta a mensagem do
+ *   código copia e cola ao cancelar/expirar o PIX.
  */
 import { Context, Markup } from 'telegraf';
 import { apiClient } from '../services/apiClient';
@@ -50,6 +51,18 @@ async function editOrReply(
     void err;
   }
   await ctx.reply(text, extra as never);
+}
+
+/**
+ * Tenta deletar uma mensagem pelo message_id. Silencia erros (mensagem já deletada, etc).
+ */
+async function tryDeleteMessage(ctx: Context, messageId: number): Promise<void> {
+  try {
+    const chatId = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat.id;
+    if (chatId) await ctx.telegram.deleteMessage(chatId, messageId);
+  } catch {
+    // silencia: mensagem pode já ter sido deletada ou ser muito antiga (>48h)
+  }
 }
 
 export function initPaymentHandlers(): void {
@@ -234,7 +247,6 @@ export async function executePayment(
     const firstName     = ctx.from!.first_name;
     const username      = ctx.from!.username;
     const pendingCoupon = session.pendingCoupon ?? undefined;
-    // FIX-QTY-BOT: lê qty da sessão e envia como `quantity` (nome do campo no tipo)
     const quantity      = session.pendingQty ?? 1;
 
     await editOrReply(ctx, '⏳ <b>Processando pagamento...</b>', { parse_mode: 'HTML' });
@@ -242,7 +254,7 @@ export async function executePayment(
     const payment = await apiClient.createPayment({
       telegramId: String(userId),
       productId,
-      quantity,     // ← FIX: quantity agora é enviado à API
+      quantity,
       firstName,
       username,
       paymentMethod: method,
@@ -255,8 +267,6 @@ export async function executePayment(
     }
 
     if (payment.paidWithBalance) {
-      // BALANCE: a API (deliveryService) já enviou o conteúdo direto ao usuário.
-      // O bot apenas confirma o pagamento sem repetir o conteúdo.
       if (pendingCoupon) await markCouponUsed(userId, pendingCoupon);
       await clearSession(userId, firstName);
       const productName = payment.productName ?? productId;
@@ -314,7 +324,14 @@ export async function executePayment(
         }
       );
     }
-    await ctx.reply(`<code>${qrText}</code>`, { parse_mode: 'HTML' });
+
+    // FIX-CANCEL-CODE-MSG: salva o message_id do código copia e cola
+    // para poder deletá-lo ao cancelar/expirar o PIX.
+    const codeMsg = await ctx.reply(`<code>${qrText}</code>`, { parse_mode: 'HTML' });
+    const updatedSession = await getSession(userId);
+    updatedSession.pixCodeMessageId = codeMsg.message_id;
+    await saveSession(userId, updatedSession);
+
     await schedulePIXExpiry(ctx, payment.paymentId, userId, expiresAt);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Erro desconhecido';
@@ -340,8 +357,6 @@ export async function handleCheckPayment(
       cancelPIXTimer(userId);
       await clearPixExpiry(userId);
       await clearSession(userId, firstName);
-      // PIX: a API (deliveryService) já entregou o conteúdo via Telegram webhook.
-      // O bot apenas confirma o pagamento sem repetir o conteúdo.
       await ctx.reply(
         `✅ <b>Pagamento confirmado!</b>\n\n` +
         `📦 <b>${escapeHtml(status.productName ?? 'seu produto')}</b>\n\n` +
@@ -384,13 +399,20 @@ export async function handleCancelPayment(
   try {
     const userId    = ctx.from!.id;
     const firstName = ctx.from!.first_name;
-    const result    = await apiClient.cancelPayment(paymentId, String(userId));
+
+    // FIX-CANCEL-CODE-MSG: lê message_id do código antes de limpar a sessão
+    const session = await getSession(userId);
+    const pixCodeMessageId = session.pixCodeMessageId;
+
+    const result = await apiClient.cancelPayment(paymentId, String(userId));
     cancelPIXTimer(userId);
     await clearPixExpiry(userId);
     await clearSession(userId, firstName);
+
     if (result.cancelled) {
-      // FIX-CANCEL-EDIT: edita a mensagem do QR Code (remove botões, mostra cancelado)
-      // em vez de só enviar nova mensagem — antes o QR ficava visualmente ativo.
+      // Deleta a mensagem do código copia e cola
+      if (pixCodeMessageId) await tryDeleteMessage(ctx, pixCodeMessageId);
+      // Edita a mensagem do QR (remove botões)
       await editOrReply(
         ctx,
         `❌ <b>PIX cancelado.</b>\n\nUse /produtos para fazer um novo pedido.`,
@@ -431,10 +453,13 @@ export async function schedulePIXExpiry(
     try {
       const session = await getSession(userId);
       if (session.paymentId !== paymentId) return;
-      const firstName = session.firstName ?? '';
+      const firstName        = session.firstName ?? '';
+      const pixCodeMessageId = session.pixCodeMessageId;
       cancelPIXTimer(userId);
       await clearPixExpiry(userId);
       await clearSession(userId, firstName);
+      // Deleta o código copia e cola ao expirar também
+      if (pixCodeMessageId) await tryDeleteMessage(ctx, pixCodeMessageId);
       await ctx.reply(
         `⏰ <b>PIX expirado!</b>\n\nSeu PIX expirou. Use /produtos para gerar um novo pedido.`,
         {
