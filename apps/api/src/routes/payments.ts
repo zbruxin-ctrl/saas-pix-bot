@@ -29,6 +29,10 @@
 //   O interceptor Axios do bot só lê `response.data.error` — resultado: a mensagem real
 //   se perdia e o bot mostrava genérico 'Erro ao cancelar pagamento.'.
 //   Corrigido: todas as respostas de erro do endpoint agora usam o campo `error`.
+// FIX-CANCEL-DATA: POST /:id/cancel retornava { success:true, message } em caso de sucesso.
+//   O apiClient lê data.data!, que era undefined — result.cancelled ficava undefined (falsy)
+//   → bot caia no catch → '❌ Erro ao cancelar pagamento.' mesmo com HTTP 200.
+//   Corrigido: sucesso agora retorna { success:true, data:{ cancelled:true, message } }.
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { StockItemStatus } from '@prisma/client';
@@ -379,6 +383,10 @@ paymentsRouter.get(
 // POST /api/payments/:id/cancel
 // FIX-CANCEL-ERROR-FIELD: respostas de erro usam campo `error` (padrão da API),
 //   não `message`. O interceptor Axios do bot lê só `response.data.error`.
+// FIX-CANCEL-DATA: sucesso agora retorna { success:true, data:{ cancelled:true, message } }
+//   em vez de { success:true, message }. O apiClient.cancelPayment lê data.data! —
+//   antes data.data era undefined → result.cancelled === undefined (falsy) → catch →
+//   '❌ Erro ao cancelar pagamento.' mesmo com HTTP 200.
 paymentsRouter.post(
   '/:id/cancel',
   requireBotSecret,
@@ -400,12 +408,12 @@ paymentsRouter.post(
 
     const result = await paymentService.cancelPayment(id);
     if (!result.cancelled) {
-      // FIX-CANCEL-ERROR-FIELD: era `message`, agora é `error` para o interceptor Axios extrair corretamente
       res.status(400).json({ success: false, error: result.message });
       return;
     }
     logger.info(`Pagamento ${id} cancelado via bot (telegramId: ${telegramId})`);
-    res.json({ success: true, message: result.message });
+    // FIX-CANCEL-DATA: usa `data` para ser consistente com ApiResponse<T>
+    res.json({ success: true, data: { cancelled: true, message: result.message } });
   }
 );
 
