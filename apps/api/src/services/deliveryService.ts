@@ -10,6 +10,8 @@
 //           itens já entregues); release só ocorre em finally de erro ou expiração
 // PERF-QTY8: deliverAllAsOne paraleliza order.update + deliveryLog.create + markDelivered
 //            via Promise.all — seguro pois markDelivered agora usa $transaction atômica
+// FIX-POOL2: deliverAllAsOne de volta a sequencial para não esgotar pool do Neon
+//            (Promise.all com 6 orders abria 12 transações simultâneas → timeout)
 import { DeliveryType, TelegramUser, Product } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { telegramService } from './telegramService';
@@ -45,15 +47,15 @@ function buildConfirmationMessage(
   switch (deliveryType) {
     case DeliveryType.LINK:
       return (
-        `🎉 *Pagamento confirmado!*\n\n` +
-        `📦 *Produto:* ${product.name}\n\n` +
-        `🔗 Acesse através do link abaixo:\n${content}\n\n` +
-        `⚠️ _Guarde este link em local seguro._`
+        `\uD83C\uDF89 *Pagamento confirmado!*\n\n` +
+        `\uD83D\uDCE6 *Produto:* ${product.name}\n\n` +
+        `\uD83D\uDD17 Acesse através do link abaixo:\n${content}\n\n` +
+        `\u26A0\uFE0F _Guarde este link em local seguro._`
       );
     case DeliveryType.ACCOUNT:
-      return `🎉 *Pagamento confirmado!*\n\n📦 *Produto:* ${product.name}\n\n${content}`;
+      return `\uD83C\uDF89 *Pagamento confirmado!*\n\n\uD83D\uDCE6 *Produto:* ${product.name}\n\n${content}`;
     default:
-      return `🎉 *Pagamento confirmado!*\n\n📦 *Produto:* ${product.name}\n\n${content}`;
+      return `\uD83C\uDF89 *Pagamento confirmado!*\n\n\uD83D\uDCE6 *Produto:* ${product.name}\n\n${content}`;
   }
 }
 
@@ -63,15 +65,15 @@ function buildMultiItemMessage(product: Product, contents: string[], deliveryTyp
   const custom = meta?.confirmationMessage as string | undefined;
 
   const header =
-    `✅ *Compra realizada com sucesso!*\n` +
-    `📦 *${product.name}* (${contents.length}x)\n\n` +
+    `\u2705 *Compra realizada com sucesso!*\n` +
+    `\uD83D\uDCE6 *${product.name}* (${contents.length}x)\n\n` +
     `*O conteúdo foi enviado na mensagem acima. Guarde em local seguro.*`;
 
   const items = contents
     .map((c, i) => `\n${contents.length > 1 ? `*${i + 1}.* ` : ''}\`${c}\``)
     .join('');
 
-  const footer = `\n\n⚠️ _Os links são de uso único e não realizamos trocas. Utilize dentro do prazo._`;
+  const footer = `\n\n\u26A0\uFE0F _Os links são de uso único e não realizamos trocas. Utilize dentro do prazo._`;
 
   if (custom && custom.trim()) {
     const joined = contents.join('\n');
@@ -127,7 +129,7 @@ async function sendMedia(
     } else if (media.mediaType === 'IMAGE') {
       await telegramService.sendPhoto(telegramId, media.url, caption);
     } else {
-      const msg = caption ? `${caption}\n📎 ${media.url}` : `📎 ${media.url}`;
+      const msg = caption ? `${caption}\n\uD83D\uDCCE ${media.url}` : `\uD83D\uDCCE ${media.url}`;
       await telegramService.sendMessage(telegramId, msg);
     }
   } catch (err) {
@@ -279,8 +281,8 @@ class DeliveryService {
           content.includes('youtu.be');
 
         const confirmMsg =
-          `🎉 *Pagamento confirmado!*\n\n` +
-          `📦 *Produto:* ${product.name}`;
+          `\uD83C\uDF89 *Pagamento confirmado!*\n\n` +
+          `\uD83D\uDCE6 *Produto:* ${product.name}`;
 
         const mainMedia: MediaEntry = {
           url: content,
@@ -312,19 +314,20 @@ class DeliveryService {
     }
 
     return (
-      `🎉 *${parsedContent.message || 'Acesso liberado!'}*\n\n` +
-      `📦 *Produto:* ${product.name}\n\n` +
-      (parsedContent.accessUrl ? `🌐 *URL de acesso:* ${parsedContent.accessUrl}\n\n` : '') +
-      (parsedContent.instructions ? `📋 *Instruções:* ${parsedContent.instructions}\n\n` : '') +
-      `⚠️ _Salve estas informações em local seguro._`
+      `\uD83C\uDF89 *${parsedContent.message || 'Acesso liberado!'}*\n\n` +
+      `\uD83D\uDCE6 *Produto:* ${product.name}\n\n` +
+      (parsedContent.accessUrl ? `\uD83C\uDF10 *URL de acesso:* ${parsedContent.accessUrl}\n\n` : '') +
+      (parsedContent.instructions ? `\uD83D\uDCCB *Instruções:* ${parsedContent.instructions}\n\n` : '') +
+      `\u26A0\uFE0F _Salve estas informações em local seguro._`
     );
   }
 
   /**
    * Entrega todos os conteúdos de um pagamento numa única mensagem agrupada.
-   * PERF-QTY8: após enviar a mensagem, paraleliza o registro de cada order
-   * (order.update + deliveryLog.create + markDelivered) via Promise.all.
-   * Seguro pois markDelivered agora usa $transaction atômica no stockService.
+   * FIX-POOL2: registra cada order SEQUENCIALMENTE após enviar a mensagem,
+   * para não esgotar o pool de conexões do Neon com transações simultâneas.
+   * A mensagem ao Telegram é enviada primeiro (1 request) e só então
+   * o banco é atualizado order por order.
    */
   async deliverAllAsOne(
     paymentId: string,
@@ -334,7 +337,6 @@ class DeliveryService {
   ): Promise<void> {
     let contents = await stockService.getReservedItemsContent(paymentId);
 
-    // FIX-QTY5: usa array mutável corretamente para fallback
     if (contents.length === 0) {
       const fallback = product.deliveryContent ?? '';
       contents = Array(orderIds.length).fill(fallback) as string[];
@@ -343,32 +345,30 @@ class DeliveryService {
     const message = buildMultiItemMessage(product, contents, product.deliveryType);
     const productMedias = getProductMedias(product);
 
-    // Envia a mensagem PRIMEIRO (sequencial — única msg ao Telegram)
+    // Envia a mensagem PRIMEIRO (1 request ao Telegram)
     await sendMessageWithMedias(telegramUser.telegramId, message, productMedias);
 
-    // PERF-QTY8: paraleliza o registro de entrega de cada order
-    // markDelivered é atômico ($transaction), então é seguro em paralelo
-    await Promise.all(
-      orderIds.map(async (orderId, i) => {
-        await prisma.$transaction([
-          prisma.order.update({
-            where: { id: orderId },
-            data: { status: 'DELIVERED', deliveredAt: new Date() },
-          }),
-          prisma.deliveryLog.create({
-            data: {
-              orderId,
-              attempt: 1,
-              status: 'SUCCESS',
-              message: `Entrega agrupada (${orderIds.length} unidades)`,
-            },
-          }),
-        ]);
-        if (contents[i]) {
-          await stockService.markDelivered(paymentId, orderId);
-        }
-      })
-    );
+    // FIX-POOL2: registra cada order SEQUENCIALMENTE para não esgotar pool do Neon
+    for (let i = 0; i < orderIds.length; i++) {
+      const orderId = orderIds[i];
+      await prisma.$transaction([
+        prisma.order.update({
+          where: { id: orderId },
+          data: { status: 'DELIVERED', deliveredAt: new Date() },
+        }),
+        prisma.deliveryLog.create({
+          data: {
+            orderId,
+            attempt: 1,
+            status: 'SUCCESS',
+            message: `Entrega agrupada (${orderIds.length} unidades)`,
+          },
+        }),
+      ]);
+      if (contents[i]) {
+        await stockService.markDelivered(paymentId, orderId);
+      }
+    }
   }
 }
 
