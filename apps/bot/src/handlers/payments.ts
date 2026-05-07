@@ -9,6 +9,9 @@
  * FIX-DELIVERY-BOT: bot não monta mais mensagem de entrega para BALANCE/PIX.
  *   A API (deliveryService) já entregou o conteúdo direto ao usuário.
  *   O bot apenas exibe confirmação simples sem repetir o conteúdo.
+ * FIX-CANCEL-EDIT: handleCancelPayment agora edita a mensagem do QR Code
+ *   (remove botões e mostra status cancelado) em vez de só enviar nova mensagem.
+ *   Antes o QR ficava visualmente ativo mesmo após o cancelamento.
  */
 import { Context, Markup } from 'telegraf';
 import { apiClient } from '../services/apiClient';
@@ -386,9 +389,24 @@ export async function handleCancelPayment(
     await clearPixExpiry(userId);
     await clearSession(userId, firstName);
     if (result.cancelled) {
-      await ctx.reply(`✅ PIX cancelado com sucesso. Use /produtos para fazer um novo pedido.`, { parse_mode: 'HTML' });
+      // FIX-CANCEL-EDIT: edita a mensagem do QR Code (remove botões, mostra cancelado)
+      // em vez de só enviar nova mensagem — antes o QR ficava visualmente ativo.
+      await editOrReply(
+        ctx,
+        `❌ <b>PIX cancelado.</b>\n\nUse /produtos para fazer um novo pedido.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🛒 Ver Produtos', 'show_products')],
+          ]).reply_markup,
+        }
+      );
     } else {
-      await ctx.reply(`⚠️ ${escapeHtml(result.message ?? 'Não foi possível cancelar o pagamento.')}`, { parse_mode: 'HTML' });
+      await editOrReply(
+        ctx,
+        `⚠️ ${escapeHtml(result.message ?? 'Não foi possível cancelar o pagamento.')}`,
+        { parse_mode: 'HTML' }
+      );
     }
   } catch (err) {
     console.error('[handleCancelPayment] erro:', err);
