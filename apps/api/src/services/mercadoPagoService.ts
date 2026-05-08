@@ -6,6 +6,10 @@
 // FIX B8: buildPayerEmail remove hífens do UUID
 //   → MP rejeita hífens no local-part do email (erro 4050)
 //   → "telegram.{uuid-com-hifens}@..." → "payer{uuidsemhifens}@bot.com.br"
+// FIX-COMM-ERR: retry com backoff exponencial em communication_error
+//   → MP retorna communication_error em falhas transitórias
+//   → 3 tentativas: 0ms, 1s, 3s — nova idempotency key a cada retry
+//     para forçar nova requisição e contornar conflito de cache no MP
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { env } from '../config/env';
@@ -65,8 +69,6 @@ function isPublicUrl(url: string): boolean {
 }
 
 // FIX B8: MP (erro 4050) rejeita hifens no local-part do email.
-// UUID tem formato xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx — removemos os hifens
-// antes de montar o email, garantindo apenas caracteres alfanuméricos + ponto.
 function buildPayerEmail(externalReference: string): string {
   const sanitized = externalReference.replace(/-/g, '').toLowerCase();
   return `payer.${sanitized}@bot.com.br`;
@@ -88,6 +90,16 @@ function extractMpError(error: unknown): string {
     return JSON.stringify(data);
   }
   return (error as Error).message || 'Erro desconhecido';
+}
+
+/** Retorna true se o erro do MP é transitório e vale a pena tentar de novo. */
+function isCommunicationError(error: unknown): boolean {
+  const msg = extractMpError(error).toLowerCase();
+  return msg.includes('communication_error') || msg.includes('communication error');
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 class MercadoPagoService {
@@ -117,42 +129,63 @@ class MercadoPagoService {
   }
 
   async createPixPayment(data: PixPaymentData): Promise<MercadoPagoPixResponse> {
-    const idempotencyKey = `pix_${data.externalReference}`;
+    const RETRY_DELAYS = [0, 1000, 3000]; // 3 tentativas: imediata, 1s, 3s
 
-    const requestBody: Record<string, unknown> = {
-      transaction_amount: data.transactionAmount,
-      description: data.description.substring(0, 255),
-      payment_method_id: 'pix',
-      payer: {
-        email: buildPayerEmail(data.externalReference),
-        first_name: (data.payerName.split(' ')[0] || 'Usuario').substring(0, 50),
-        last_name: (data.payerName.split(' ').slice(1).join(' ') || 'Telegram').substring(0, 50),
-      },
-      external_reference: data.externalReference,
-      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-    };
+    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
+      if (attempt > 0) {
+        await sleep(RETRY_DELAYS[attempt]);
+        logger.warn(`[MP] Retry ${attempt}/${RETRY_DELAYS.length - 1} para communication_error | ref=${data.externalReference}`);
+      }
 
-    if (isPublicUrl(data.notificationUrl)) {
-      requestBody.notification_url = data.notificationUrl;
-    } else {
-      logger.warn(
-        `notification_url ignorada (localhost não é aceito pelo MP): ${data.notificationUrl}`
-      );
+      // Nova idempotency key a cada retry: força o MP a não reusar cache da
+      // requisição anterior que falhou com communication_error.
+      const idempotencyKey = attempt === 0
+        ? `pix_${data.externalReference}`
+        : `pix_${data.externalReference}_r${attempt}`;
+
+      const requestBody: Record<string, unknown> = {
+        transaction_amount: data.transactionAmount,
+        description: data.description.substring(0, 255),
+        payment_method_id: 'pix',
+        payer: {
+          email: buildPayerEmail(data.externalReference),
+          first_name: (data.payerName.split(' ')[0] || 'Usuario').substring(0, 50),
+          last_name: (data.payerName.split(' ').slice(1).join(' ') || 'Telegram').substring(0, 50),
+        },
+        external_reference: data.externalReference,
+        date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      };
+
+      if (isPublicUrl(data.notificationUrl)) {
+        requestBody.notification_url = data.notificationUrl;
+      } else {
+        logger.warn(
+          `notification_url ignorada (localhost não é aceito pelo MP): ${data.notificationUrl}`
+        );
+      }
+
+      try {
+        const response = await this.client.post<MercadoPagoPixResponse>(
+          '/v1/payments',
+          requestBody,
+          { headers: { 'X-Idempotency-Key': idempotencyKey } }
+        );
+        logger.info(`PIX criado: MP_ID=${response.data.id} | ref=${data.externalReference}`);
+        return response.data;
+      } catch (error: unknown) {
+        const mpError = extractMpError(error);
+        const isLast = attempt === RETRY_DELAYS.length - 1;
+        if (!isLast && isCommunicationError(error)) {
+          logger.warn(`[MP] communication_error na tentativa ${attempt + 1} — aguardando ${RETRY_DELAYS[attempt + 1]}ms antes de retry`);
+          continue;
+        }
+        logger.error(`Falha ao criar PIX: ${mpError}`);
+        throw new Error(`Mercado Pago: ${mpError}`);
+      }
     }
 
-    try {
-      const response = await this.client.post<MercadoPagoPixResponse>(
-        '/v1/payments',
-        requestBody,
-        { headers: { 'X-Idempotency-Key': idempotencyKey } }
-      );
-      logger.info(`PIX criado: MP_ID=${response.data.id} | ref=${data.externalReference}`);
-      return response.data;
-    } catch (error: unknown) {
-      const mpError = extractMpError(error);
-      logger.error(`Falha ao criar PIX: ${mpError}`);
-      throw new Error(`Mercado Pago: ${mpError}`);
-    }
+    // TypeScript: nunca alcançado, mas necessário para o compilador
+    throw new Error('Mercado Pago: falha inesperada no loop de retry');
   }
 
   async getPaymentById(mercadoPagoId: string): Promise<MercadoPagoPaymentDetail> {
